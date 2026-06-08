@@ -9,8 +9,22 @@ pub fn handle_telegram(action: TelegramAction, ctx: &Context) -> Result<()> {
     let quiet = ctx.quiet;
     match action {
         TelegramAction::Daily { date, with_json } => {
-            // Light body surface for daily (Phase 4): include latest weight if bodylog data is handy.
+            // Real daily: reuse compact krebs status (or light body) + produce usable MDV2 caption + suggested image.
             let body_note = get_telegram_body_note(&date, ctx);
+            let ks = crate::commands::report::build_compact_krebs_status_for_agent(&date, ctx);
+            let one = ks
+                .get("one_sentence")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Daily metabolic snapshot.");
+            let flux = ks.get("flux_proxy").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let caption = format!(
+                "*Daily Krebs* \\({}\\)\n\n{}\n\nFlux: *{:.1}/10* \\| Body: `{}`\n\n`krebslog report daily --date \"{}\"` or `image krebs-cycle`.",
+                date, one, flux, ks.get("body_weight_trend").and_then(|v| v.as_str()).unwrap_or("?"), date
+            );
+            let suggested = format!(
+                "~/reports/krebslog/krebs-cycle-{}.svg",
+                date.replace('-', "")
+            );
 
             if json {
                 let mut out = serde_json::json!({
@@ -18,18 +32,25 @@ pub fn handle_telegram(action: TelegramAction, ctx: &Context) -> Result<()> {
                     "command": "telegram daily",
                     "date": date,
                     "with_json": with_json,
-                    "note": "skeleton: produces MarkdownV2 + image path in real impl"
+                    "caption_markdownv2": caption,
+                    "suggested_image": suggested,
+                    "krebs_status": ks
                 });
                 if let Some(b) = body_note {
                     out["body"] = b;
                 }
                 println!("{}", serde_json::to_string_pretty(&out).unwrap());
             } else if !quiet {
-                println!("telegram daily --date {} (skeleton)", date);
-                if let Some(b) = body_note {
-                    if let Some(w) = b.get("weight_kg").and_then(|v| v.as_f64()) {
-                        println!("  body weight: {:.1} kg", w);
-                    }
+                println!(
+                    "{}",
+                    caption
+                        .replace("\\(", "(")
+                        .replace("\\)", ")")
+                        .replace("\\|", "|")
+                );
+                println!("Suggested image: {}", suggested);
+                if with_json {
+                    println!("(JSON block emitted above for bots)");
                 }
             }
         }
@@ -84,16 +105,39 @@ pub fn handle_telegram(action: TelegramAction, ctx: &Context) -> Result<()> {
                     }
                 }
             } else {
+                // Real support for other common types by delegating to compact or simple summary.
+                let ks =
+                    crate::commands::report::build_compact_krebs_status_for_agent(&period, ctx);
+                let flux = ks.get("flux_proxy").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let caption = match r#type.as_str() {
+                    "daily" => format!("*Daily* \\({}\\)\nFlux {:.1}/10 — use report daily or image krebs-cycle.", period, flux),
+                    "energy" => format!("*Energy Balance* \\({}\\)\nFlux {:.1}/10 — body trend validates or challenges estimate.", period, flux),
+                    "redox" => format!("*Redox Balance* \\({}\\)\nFlux {:.1}/10 — see full report redox-balance.", period, flux),
+                    _ => format!("*{}* \\({}\\)\nFlux {:.1}/10. Use `krebslog report --help` for details.", r#type, period, flux),
+                };
+                let suggested = format!(
+                    "~/reports/krebslog/{}-{}.svg",
+                    r#type,
+                    period.replace(' ', "_")
+                );
+
                 if json {
-                    println!(
-                        "{}",
-                        serde_json::json!({ "success": true, "type": r#type, "period": period, "post_ready": post_ready, "note": "skeleton (only krebs-status produces real output today)" })
-                    );
+                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                        "success": true, "type": r#type, "period": period, "post_ready": post_ready,
+                        "caption_markdownv2": caption, "suggested_image": suggested, "krebs_status": ks
+                    })).unwrap());
                 } else if !quiet {
                     println!(
-                        "telegram report --type {} --period {} (skeleton)",
-                        r#type, period
+                        "{}",
+                        caption
+                            .replace("\\(", "(")
+                            .replace("\\)", ")")
+                            .replace("\\|", "|")
                     );
+                    println!("Suggested image: {}", suggested);
+                    if post_ready {
+                        println!("(post this caption + the image with your Telegram bot)");
+                    }
                 }
             }
         }

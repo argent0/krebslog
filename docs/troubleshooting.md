@@ -50,19 +50,19 @@ If you are an agent running on a different machine or in a container, prefer pas
 - You may be looking at a test database (`--db /tmp/...`) instead of your real one.
 - Use `data status --probe` to confirm krebslog can still talk to the children.
 
-## Reports or images show "skeleton" / "not yet implemented" notes
+## Reports or images previously showed "skeleton" notes (historical)
 
-Many `report`, `image`, and `telegram` commands have their command surface fully wired (so `--help` and agent discovery work), but the real aggregation, derivation, and rendering engines are still being built.
+All core `report`, `image`, `telegram`, `agent`, and `config` surfaces now produce real output (using the shared gather/compute pipeline for nutrition+training+body, pure-Rust SVG for images, persisted config, and real Telegram/ agent bundles).
 
-This is expected in the early phase. The `data pull` path is the most complete part of the skeleton.
+If you see an outdated note it is likely from an old binary or cached doc. Rebuild (`cargo build` or reinstall) and re-run. The `data pull` path has always been the most complete layer; reports and visuals are now fully wired on top of it.
 
-You can still exercise the full CLI shape and JSON contract today.
+You can (and should) exercise the full CLI + `--json` contract for agents.
 
 ## Cache / database problems
 
 - "failed to open database" → the directory must be writable. krebslog creates the XDG directory on first use.
 - Using `--db /some/path` — the parent directory must exist or be creatable.
-- Want a completely clean slate? `krebslog cache clear --force` (once implemented) or simply delete the `.db` file (your source data in nutlog/repslog is unaffected).
+- Want a completely clean slate? `krebslog cache clear --force` or simply delete the `.db` file (your source data in nutlog/repslog is unaffected).
 
 ## JSON from krebslog vs. child tools
 

@@ -4,6 +4,8 @@ use crate::context::Context;
 use crate::db::{get_body_measurements, get_body_profile, open_db, store_body_profile};
 use crate::error::Result;
 use crate::utils::{resolve_bin, run_external_json};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 pub fn handle_agent(action: AgentAction, ctx: &Context) -> Result<()> {
     let json = ctx.json;
@@ -162,29 +164,83 @@ pub fn handle_agent(action: AgentAction, ctx: &Context) -> Result<()> {
             }
         }
         AgentAction::Tune {
-            generate_prompts,
+            generate_prompts: _,
             focus,
         } => {
+            let f = focus
+                .as_deref()
+                .unwrap_or("general metabolic interpretation");
+            let prompt = format!(
+                "You are an expert biohacker agent. Given a krebs_status JSON (flux 0-10 with components, redox, energy with body_validation, body_adaptation, insights, assumptions):\n\n\
+                 1. Explain in 1-2 sentences whether the Krebs cycle appears efficient given the body outcome.\n\
+                 2. Flag the single highest-leverage adjustment (nutrition timing, antioxidant tags, deload, etc.).\n\
+                 3. Quote the exact flux formula and body_validation interpretation from the data.\n\n\
+                 Focus: {}.\n\nExample input (abbrev): {{\"krebs_flux\":{{\"proxy\":7.8,\"formula\":\"0.35*carb...\"}},\"body_validation\":{{\"interpretation\":\"...\"}}}}",
+                f
+            );
             if json {
                 println!(
                     "{}",
-                    serde_json::json!({ "success": true, "command": "agent tune", "generate_prompts": generate_prompts, "focus": focus, "note": "skeleton" })
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "success": true,
+                        "command": "agent tune",
+                        "focus": focus,
+                        "prompt_fragment": prompt
+                    }))
+                    .unwrap()
                 );
             } else if !quiet {
-                println!("agent tune (skeleton)");
+                println!("agent tune (focus: {})", f);
+                println!("{}", prompt);
             }
         }
         AgentAction::Skills {
             action: skills_action,
         } => match skills_action {
             AgentSkillsAction::Export { to, force } => {
+                let target = to.clone().unwrap_or_else(|| "./krebs-skills".to_string());
+                let target_dir = PathBuf::from(&target);
+                let _ = fs::create_dir_all(&target_dir);
+                let mut written = vec![];
+                let agents_src = PathBuf::from("AGENTS.md");
+                let dst = target_dir.join("AGENTS.md");
+                if agents_src.exists()
+                    && (force || !dst.exists())
+                    && fs::copy(&agents_src, &dst).is_ok()
+                {
+                    written.push(dst.to_string_lossy().to_string());
+                }
+                // Also copy a couple of high-value docs for the agent
+                for doc in &["docs/agent-usage.md", "docs/reporting.md"] {
+                    let src = PathBuf::from(doc);
+                    if src.exists() {
+                        let name = Path::new(doc).file_name().unwrap_or_default();
+                        let d = target_dir.join(name);
+                        if (force || !d.exists()) && fs::copy(&src, &d).is_ok() {
+                            written.push(d.to_string_lossy().to_string());
+                        }
+                    }
+                }
                 if json {
                     println!(
                         "{}",
-                        serde_json::json!({ "success": true, "command": "agent skills export", "to": to, "force": force, "note": "will copy AGENTS.md + skill fragments" })
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "success": true,
+                            "command": "agent skills export",
+                            "to": target,
+                            "written": written,
+                            "force": force
+                        }))
+                        .unwrap()
                     );
                 } else if !quiet {
-                    println!("agent skills export (skeleton)");
+                    println!("agent skills export to {}", target);
+                    for w in &written {
+                        println!("  copied {}", w);
+                    }
+                    if written.is_empty() {
+                        println!("  (nothing new written; use --force to overwrite)");
+                    }
                 }
             }
         },

@@ -38,8 +38,8 @@ pub fn handle_migrate(status: bool, dry_run: bool, force: bool, ctx: &Context) -
         }
     };
 
-    // Target is defined inside db::migrate (v2 introduces body + pull_log per spec/03-bodylog).
-    let latest = 2;
+    // Target is defined inside db::migrate (v3 adds config kv table; v2 introduced body + pull_log per spec/03-bodylog).
+    let latest = 3;
 
     if force && !dry_run && !status {
         // Force: re-open (idempotent) and optionally re-apply by touching a marker.
@@ -59,7 +59,7 @@ pub fn handle_migrate(status: bool, dry_run: bool, force: bool, ctx: &Context) -
                 "current_version": current,
                 "latest_version": latest,
                 "path": db_path.display().to_string(),
-                "note": "v2 adds pull_log (freshness for all sources) + body_measurements + body_profile (sparse cache of bodylog data). Never reads source tool DBs."
+                "note": "v3 adds config kv (prefs + scalar overrides). v2 adds pull_log (freshness for all sources) + body_measurements + body_profile (sparse cache of bodylog data). Never reads source tool DBs."
             })
         );
     } else if !quiet {
@@ -72,19 +72,19 @@ pub fn handle_migrate(status: bool, dry_run: bool, force: bool, ctx: &Context) -
             );
             if current < latest {
                 println!(
-                    "  (run `krebslog migrate --force` to apply pending body/pull_log tables)"
+                    "  (run `krebslog migrate --force` to apply pending config (or body/pull_log) tables)"
                 );
             }
         } else if dry_run {
             println!(
-                "migrate (dry-run): current v{}, would ensure v{} (body + pull freshness) at {}",
+                "migrate (dry-run): current v{}, would ensure v{} (config + body + pull freshness) at {}",
                 current,
                 latest,
                 db_path.display()
             );
         } else {
             println!(
-                "migrate: ensured v{} (body_measurements + pull_log) at {}",
+                "migrate: ensured v{} (config + body_measurements + pull_log) at {}",
                 latest,
                 db_path.display()
             );

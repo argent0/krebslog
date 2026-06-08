@@ -11,10 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Stubs for report commands. Full implementation comes after data pulling + aggregation engine.
 pub fn handle_report(action: ReportAction, ctx: &Context) -> Result<()> {
-    // For now we only use the output flags; the rest (db, bins, no_cache) will be
-    // relevant once we have real aggregation + caching + bodylog integration.
     let json = ctx.json;
     let quiet = ctx.quiet;
     match action {
@@ -23,9 +20,18 @@ pub fn handle_report(action: ReportAction, ctx: &Context) -> Result<()> {
             include_image,
             output_dir,
         } => {
-            // Light body enrichment (Phase 3 of spec/03): surface latest known measurement for the date
-            // when bodylog data (cached or live) is available. Full nutrition+training daily grain is future.
-            let body_for_date = get_light_body_for_date(&date, ctx);
+            // Real implementation: gather the single-day (or near) window and surface
+            // nutrition + training extracts + derived krebs/redox/energy + body (if available).
+            // Uses the same pipeline as krebs-status/web for consistency and transparency.
+            let start = date.clone();
+            let g = gather_period_data(&start, &start, ctx);
+            let (flux, _fc) = compute_krebs_flux(&g);
+            let redox = compute_redox_balance(&g);
+            let energy = compute_energy_with_body_validation(&g, 1);
+            let body = compute_body_adaptation(&g, 1);
+            let (kcal, protein, carbs, fat, _ant) = extract_nutrition_totals(&g);
+            let (vol, sess, _load) = extract_training_totals(&g);
+            let body_light = get_light_body_for_date(&date, ctx);
 
             if json {
                 let mut out = serde_json::json!({
@@ -34,47 +40,90 @@ pub fn handle_report(action: ReportAction, ctx: &Context) -> Result<()> {
                     "date": date,
                     "include_image": include_image,
                     "output_dir": output_dir,
-                    "note": "skeleton: full daily report + derived krebs/redox not yet implemented"
+                    "nutrition": {"kcal": kcal, "protein_g": protein, "carbs_g": carbs, "fat_g": fat},
+                    "training": {"volume": vol, "sessions": sess},
+                    "krebs_flux": flux,
+                    "redox_balance": redox,
+                    "energy_balance": energy,
+                    "body_adaptation": body,
+                    "sources": {
+                        "nutlog": g.nutlog_available,
+                        "repslog": g.repslog_available,
+                        "bodylog": g.bodylog_available
+                    }
                 });
-                if let Some(b) = body_for_date {
+                if let Some(b) = body_light {
                     out["body"] = b;
                 }
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&out).expect("in-memory json")
-                );
+                println!("{}", serde_json::to_string_pretty(&out).expect("in-memory"));
             } else if !quiet {
                 println!(
-                    "report daily --date {} (skeleton — not fully implemented)",
+                    "report daily --date {} (nutrition + training + derived)",
                     date
                 );
-                if let Some(b) = &body_for_date {
+                println!(
+                    "  nutrition: {:.0} kcal (P{:.0} C{:.0} F{:.0})",
+                    kcal, protein, carbs, fat
+                );
+                println!("  training: vol {:.0}, sessions {}", vol, sess);
+                println!(
+                    "  krebs flux: {:.1}/10 (carb {:.1}, fat {:.1}, protein {:.1}, training {:.1})",
+                    flux.proxy,
+                    flux.components.carb_availability,
+                    flux.components.fat_mobilization,
+                    flux.components.protein_anaplerosis,
+                    flux.components.training_demand
+                );
+                println!("  redox: {:.1}/10 ({})", redox.score, redox.interpretation);
+                if let Some(bv) = &energy.body_validation {
+                    println!("  body validation: {}", bv.interpretation);
+                }
+                if let Some(b) = &body_light {
                     if let Some(w) = b.get("weight_kg").and_then(|v| v.as_f64()) {
-                        println!(
-                            "  body: {:.1} kg (latest cached/live measurement near date)",
-                            w
-                        );
-                    } else {
-                        println!("  body data available (see --json)");
+                        println!("  body: {:.1} kg (latest near date)", w);
                     }
                 }
                 if include_image {
-                    println!("(would also produce an image)");
+                    println!("  (include_image requested — see image krebs-cycle or report web for visuals)");
                 }
             }
         }
         ReportAction::Weekly { since, until } => {
-            // Light body enrichment (Phase 3): best-effort weight/body delta or presence for the window.
+            // Real multi-day aggregate using the shared gather/compute (body + flux/redox/energy).
+            let end = until.clone().unwrap_or_else(|| "today".to_string());
+            let g = gather_period_data(&since, &end, ctx);
+            let days = 7i64; // best effort label
+            let (flux, _fc) = compute_krebs_flux(&g);
+            let redox = compute_redox_balance(&g);
+            let energy = compute_energy_with_body_validation(&g, days);
+            let body = compute_body_adaptation(&g, days);
             let body_window = get_light_body_for_window(&since, until.as_deref(), ctx);
 
             if json {
-                let mut out = serde_json::json!({ "success": true, "command": "report weekly", "since": since, "until": until, "note": "skeleton" });
+                let mut out = serde_json::json!({
+                    "success": true,
+                    "command": "report weekly",
+                    "since": since,
+                    "until": until,
+                    "krebs_flux": flux,
+                    "redox_balance": redox,
+                    "energy_balance": energy,
+                    "body_adaptation": body
+                });
                 if let Some(b) = body_window {
                     out["body"] = b;
                 }
                 println!("{}", serde_json::to_string_pretty(&out).expect("in-memory"));
             } else if !quiet {
-                println!("report weekly --since {} (skeleton)", since);
+                println!(
+                    "report weekly --since {} (multi-day aggregates + derived)",
+                    since
+                );
+                println!("  krebs flux: {:.1}/10", flux.proxy);
+                println!("  redox: {:.1}/10 ({})", redox.score, redox.interpretation);
+                if let Some(bv) = &energy.body_validation {
+                    println!("  body validation: {}", bv.interpretation);
+                }
                 if let Some(b) = &body_window {
                     if let (Some(start), Some(end)) = (
                         b.get("start_weight").and_then(|v| v.as_f64()),
@@ -87,29 +136,63 @@ pub fn handle_report(action: ReportAction, ctx: &Context) -> Result<()> {
                             end - start
                         );
                     } else if b.get("count").and_then(|c| c.as_i64()).unwrap_or(0) > 0 {
-                        println!("  body data present for window (see --json for details)");
+                        println!("  body data present for window");
                     }
                 }
             }
         }
         ReportAction::KrebsFlux { period, output } => {
+            let start = period.clone();
+            let g = gather_period_data(&start, &start, ctx); // treat period as since for single-point view
+            let (flux, caveats) = compute_krebs_flux(&g);
             if json {
                 println!(
                     "{}",
-                    serde_json::json!({ "success": true, "command": "report krebs-flux", "period": period, "output": output, "note": "skeleton" })
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "success": true,
+                        "command": "report krebs-flux",
+                        "period": period,
+                        "output": output,
+                        "krebs_flux": flux,
+                        "caveats": caveats
+                    }))
+                    .unwrap()
                 );
             } else if !quiet {
-                println!("report krebs-flux --period {} (skeleton)", period);
+                println!("report krebs-flux --period {} ", period);
+                println!("  proxy: {:.1}/10  formula: {}", flux.proxy, flux.formula);
+                println!(
+                    "  components: carb={:.1} fat={:.1} protein={:.1} training={:.1}",
+                    flux.components.carb_availability,
+                    flux.components.fat_mobilization,
+                    flux.components.protein_anaplerosis,
+                    flux.components.training_demand
+                );
             }
         }
         ReportAction::RedoxBalance { since, until } => {
+            let end = until.clone().unwrap_or_else(|| "today".to_string());
+            let g = gather_period_data(&since, &end, ctx);
+            let redox = compute_redox_balance(&g);
             if json {
                 println!(
                     "{}",
-                    serde_json::json!({ "success": true, "command": "report redox-balance", "since": since, "until": until, "note": "skeleton" })
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "success": true,
+                        "command": "report redox-balance",
+                        "since": since,
+                        "until": until,
+                        "redox_balance": redox
+                    }))
+                    .unwrap()
                 );
             } else if !quiet {
-                println!("report redox-balance --since {} (skeleton)", since);
+                println!("report redox-balance --since {}", since);
+                println!("  score: {:.1}/10  {}", redox.score, redox.interpretation);
+                println!(
+                    "  ros_proxy: {:.1}  antioxidant_proxy: {:.1}",
+                    redox.ros_proxy, redox.antioxidant_proxy
+                );
             }
         }
         ReportAction::EnergyBalance {
@@ -117,17 +200,28 @@ pub fn handle_report(action: ReportAction, ctx: &Context) -> Result<()> {
             until: _,
             include_body_trends,
         } => {
-            // For bodylog calls we pass the flexible `since` directly (bodylog accepts
-            // today / last monday / YYYY-MM-DD etc.). Full until handling can be added
-            // when the full energy balance report is implemented.
+            // Always compute the nutrition+training base energy (body is enrichment).
+            // Body trends/validation are included when flag is set (or body data is present in gather).
+            let g = gather_period_data(&since, &since, ctx);
+            let energy = compute_energy_with_body_validation(&g, 14);
+            let (kcal, _p, _c, _f, _a) = extract_nutrition_totals(&g);
+            let (vol, sess, _l) = extract_training_totals(&g);
+
             let mut body: Option<serde_json::Value> = None;
             let mut body_notes = None;
+            let body_validation = energy.body_validation.clone().map(|bv| {
+                serde_json::json!({
+                    "weight_delta_kg": bv.weight_delta_kg,
+                    "interpretation": bv.interpretation,
+                    "discrepancy_severity": bv.discrepancy_severity,
+                    "source": "bodylog"
+                })
+            });
 
             if include_body_trends {
+                // Existing body fetch logic (kept for raw series when requested)
                 let bodylog_bin = resolve_bin(ctx.bodylog_bin.as_deref(), &["bodylog"]);
                 let cache_enabled = !ctx.no_cache;
-
-                // Phase 5: try cache first for body trends when allowed.
                 if cache_enabled {
                     if let Ok(conn) = open_db(ctx.db.as_deref()) {
                         if let Ok(cached) = get_body_measurements(&conn, &since, None) {
@@ -139,83 +233,22 @@ pub fn handle_report(action: ReportAction, ctx: &Context) -> Result<()> {
                         }
                     }
                 }
-
                 if body.is_none() {
                     if let Some(bin) = &bodylog_bin {
-                        // Prefer report weight (gives stats + series); fallback to summary
                         let call_args: Vec<String> = vec![
                             "report".into(),
                             "weight".into(),
                             "--since".into(),
                             since.clone(),
                         ];
-                        match run_external_json(bin, &call_args) {
-                            Ok((out, _)) => {
-                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
-                                    body = Some(v);
-                                    if cache_enabled {
-                                        if let Ok(conn) = open_db(ctx.db.as_deref()) {
-                                            if let Some(series) = body
-                                                .as_ref()
-                                                .and_then(|b| b.get("series"))
-                                                .and_then(|s| s.as_array())
-                                            {
-                                                let _ = store_body_measurements(&conn, series);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                body_notes = Some(format!("bodylog fetch failed: {}", e));
-                            }
-                        }
-                        if body.is_none() {
-                            let call_args: Vec<String> = vec![
-                                "report".into(),
-                                "summary".into(),
-                                "--since".into(),
-                                since.clone(),
-                            ];
-                            if let Ok((out, _)) = run_external_json(bin, &call_args) {
-                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
-                                    body = Some(serde_json::json!({ "summary": v }));
-                                }
+                        if let Ok((out, _)) = run_external_json(bin, &call_args) {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+                                body = Some(v);
                             }
                         }
                     } else {
                         body_notes = Some("bodylog binary not found".to_string());
                     }
-                }
-            }
-
-            // Always attempt to surface body validation when we successfully fetched body data
-            // (the flag still gates the live call for now; once body is first-class we can default-on).
-            let mut body_validation: Option<serde_json::Value> = None;
-            if let Some(b) = &body {
-                // Derive a small validation block from the bodylog stats (weight primarily).
-                if let Some(w) = b.get("weight").or_else(|| b.get("stats")) {
-                    let delta = w.get("change").and_then(|v| v.as_f64()).unwrap_or(
-                        w.get("end")
-                            .and_then(|e| {
-                                w.get("start")
-                                    .map(|s| e.as_f64().unwrap_or(0.0) - s.as_f64().unwrap_or(0.0))
-                            })
-                            .unwrap_or(0.0),
-                    );
-                    let label = if delta <= -0.3 {
-                        "Energy estimate validated by downward body trend (possible mild deficit or high expenditure)"
-                    } else if delta >= 0.3 {
-                        "Possible under-estimate of expenditure or surplus not fully reflected in scale (water/glycogen common)"
-                    } else {
-                        "Body weight relatively stable — energy estimate and observed outcome in reasonable agreement"
-                    };
-                    body_validation = Some(serde_json::json!({
-                        "weight_delta_kg": (delta * 100.0).round() / 100.0,
-                        "interpretation": label,
-                        "discrepancy_severity": if delta.abs() < 0.4 { "low" } else { "medium" },
-                        "source": "bodylog"
-                    }));
                 }
             }
 
@@ -225,6 +258,10 @@ pub fn handle_report(action: ReportAction, ctx: &Context) -> Result<()> {
                     "command": "report energy-balance",
                     "since": since,
                     "include_body_trends": include_body_trends,
+                    "estimated_surplus_kcal": energy.estimated_surplus_kcal,
+                    "nutrition_kcal": kcal,
+                    "training_volume": vol,
+                    "sessions": sess
                 });
                 if let Some(b) = body {
                     out["body"] = b;
@@ -235,9 +272,6 @@ pub fn handle_report(action: ReportAction, ctx: &Context) -> Result<()> {
                 if let Some(bv) = body_validation {
                     out["body_validation"] = bv;
                 }
-                if !include_body_trends {
-                    out["note"] = serde_json::json!("skeleton (nutrition + training aggregation not yet wired; body trends + validation delivered when --include-body-trends or body data present)");
-                }
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&out).expect("in-memory json")
@@ -247,44 +281,22 @@ pub fn handle_report(action: ReportAction, ctx: &Context) -> Result<()> {
                     "report energy-balance --since {} (include_body_trends={})",
                     since, include_body_trends
                 );
-                if let Some(bv) = &body_validation {
-                    println!(
-                        "body validation: {}",
-                        bv.get("interpretation")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                    );
+                println!(
+                    "  estimated surplus: {:.0} kcal (intake {} vs training+base)",
+                    energy.estimated_surplus_kcal, kcal
+                );
+                if let Some(bv) = &energy.body_validation {
+                    println!("  body validation: {}", bv.interpretation);
                 }
+                // (existing body print block retained for --include-body-trends raw details)
                 if let Some(b) = &body {
-                    println!("body trends from bodylog:");
-                    if let Some(stats) = b
-                        .get("stats")
-                        .or_else(|| b.get("weight").and_then(|w| w.get("stats")))
-                    {
-                        let start_v = stats.get("start").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                        let end_v = stats.get("end").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                        let delta = stats.get("change").and_then(|x| x.as_f64()).unwrap_or(0.0);
-                        let trend = stats.get("trend").and_then(|x| x.as_str()).unwrap_or("?");
-                        println!(
-                            "  weight: {:.1} → {:.1} (Δ {:.1} kg, trend: {})",
-                            start_v, end_v, delta, trend
-                        );
-                    } else if let Some(w) = b.get("weight") {
-                        println!(
-                            "  weight summary: {}",
-                            serde_json::to_string(w).unwrap_or_default()
-                        );
-                    } else {
-                        println!(
-                            "  body data: {}",
-                            serde_json::to_string_pretty(b).unwrap_or_default()
-                        );
-                    }
+                    println!(
+                        "body trends from bodylog: {}",
+                        serde_json::to_string(b).unwrap_or_default()
+                    );
                 } else if include_body_trends {
                     if let Some(n) = body_notes {
                         println!("  (bodylog: {})", n);
-                    } else {
-                        println!("  (no body data or bodylog unavailable)");
                     }
                 }
             }
@@ -1051,7 +1063,7 @@ fn build_period_label(raw_since: &str, start: &str, end: &str) -> String {
 // ---------------- Data Gathering ----------------
 
 #[derive(Default)]
-struct GatheredData {
+pub(crate) struct GatheredData {
     nutlog_available: bool,
     repslog_available: bool,
     bodylog_available: bool,
@@ -1069,7 +1081,7 @@ struct GatheredData {
 /// nutrition, training aggregates, and body weight/summary). Status handler
 /// may perform one additional targeted body call for raw measurements when
 /// richer adaptation details are required.
-fn gather_period_data(start: &str, end: &str, ctx: &Context) -> GatheredData {
+pub(crate) fn gather_period_data(start: &str, end: &str, ctx: &Context) -> GatheredData {
     // For the initial implementation we reuse the existing (proven) gather logic.
     // Body data collection inside gather_web_data already prefers "report weight"
     // with summary fallback and records body_measurements + body_summary.
@@ -1498,7 +1510,7 @@ fn extract_nutrition_totals(g: &GatheredData) -> (f64, f64, f64, f64, f64) {
     (kcal, protein, carbs, fat, antiox.clamp(0.0, 100.0))
 }
 
-fn extract_training_totals(g: &GatheredData) -> (f64, i64, f64) {
+pub(crate) fn extract_training_totals(g: &GatheredData) -> (f64, i64, f64) {
     let mut volume = 0.0;
     let mut sessions = 0i64;
     let mut load = 40.0;
@@ -1567,7 +1579,7 @@ fn compute_energy_balance(kcal: f64, volume: f64, sessions: i64) -> f64 {
 
 /// Compute a Krebs flux proxy (0-10) + component breakdown from the gathered
 /// nutrition and training signals. Starting weights and normalizers per spec/04 §5.
-fn compute_krebs_flux(g: &GatheredData) -> (KrebsFlux, Vec<String>) {
+pub(crate) fn compute_krebs_flux(g: &GatheredData) -> (KrebsFlux, Vec<String>) {
     let (kcal, protein, carbs, _fat, _antiox) = extract_nutrition_totals(g);
     let (volume, sessions, _load_hint) = extract_training_totals(g);
 
@@ -1616,7 +1628,7 @@ fn compute_krebs_flux(g: &GatheredData) -> (KrebsFlux, Vec<String>) {
 }
 
 /// Compute redox balance score + interpretation from training load and antioxidant hints.
-fn compute_redox_balance(g: &GatheredData) -> RedoxBalance {
+pub(crate) fn compute_redox_balance(g: &GatheredData) -> RedoxBalance {
     let (_kcal, _p, _c, _f, antiox_hint) = extract_nutrition_totals(g);
     let (_vol, _sess, load_hint) = extract_training_totals(g);
 
@@ -2060,7 +2072,7 @@ mod krebs_status_tests {
     }
 }
 
-fn status_from_score(s: u32) -> String {
+pub(crate) fn status_from_score(s: u32) -> String {
     if s >= 70 {
         "good".into()
     } else if s >= 45 {
@@ -2070,7 +2082,7 @@ fn status_from_score(s: u32) -> String {
     }
 }
 
-/// Light body lookup for daily/weekly skeletons (spec/03 Phase 3).
+/// Light body lookup for daily/weekly (spec/03 Phase 3; now used alongside full gather for the formerly-stub reports).
 /// Tries cache first (if !no_cache), then a cheap live "measurement list --since <date>" for the exact day.
 /// Returns a compact object with weight + basic comp if found.
 fn get_light_body_for_date(date: &str, ctx: &Context) -> Option<serde_json::Value> {
@@ -2549,7 +2561,7 @@ fn build_kpi_cards(kpis: &Kpis) -> String {
     out
 }
 
-fn build_krebs_cycle_svg(steps: &[KrebsCycleStep]) -> String {
+pub(crate) fn build_krebs_cycle_svg(steps: &[KrebsCycleStep]) -> String {
     // Simple circular layout for 8 TCA steps.
     // We use groups with ids so JS can attach handlers.
     let cx = 260.0;

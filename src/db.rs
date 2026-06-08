@@ -48,7 +48,8 @@ pub fn open_db(override_path: Option<&str>) -> Result<Connection> {
 
 /// Current target schema version for the krebslog cache.
 /// v2 introduced pull_log + body_measurements (per spec/03-bodylog Phase 5).
-const TARGET_VERSION: i32 = 2;
+/// v3 adds simple key/value config table for persisted user prefs and formula overrides.
+const TARGET_VERSION: i32 = 3;
 
 /// Ensure the DB is migrated to TARGET_VERSION using PRAGMA user_version.
 /// Idempotent; uses simple versioned steps.
@@ -98,6 +99,20 @@ fn migrate(conn: &Connection) -> Result<()> {
             "#,
         )
         .map_err(|e| KrebslogError::Database(format!("migration v2 failed: {}", e)))?;
+    }
+
+    // v2 -> v3: simple kv store for config (prefs + overridable scalars like base metabolism)
+    if current < 3 {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            "#,
+        )
+        .map_err(|e| KrebslogError::Database(format!("migration v3 failed: {}", e)))?;
     }
 
     // Future versions would add ALTER TABLE or new tables here, then fall through.
@@ -366,4 +381,55 @@ pub fn get_body_cache_stats(conn: &Connection) -> Result<(i64, Option<String>, O
         .unwrap_or(None);
 
     Ok((count, oldest, newest))
+}
+
+// ---------------- Config (v3) simple key/value store ----------------
+
+/// Set or update a config value (persisted across runs, overridable via DB).
+pub fn set_config_value(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO config (key, value, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at;",
+        params![key, value, now],
+    )
+    .map_err(|e| KrebslogError::Database(e.to_string()))?;
+    Ok(())
+}
+
+/// Get a single config value if present.
+pub fn get_config_value(conn: &Connection, key: &str) -> Result<Option<String>> {
+    let val: Option<String> = conn
+        .query_row(
+            "SELECT value FROM config WHERE key = ?1;",
+            params![key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| KrebslogError::Database(e.to_string()))?;
+    Ok(val)
+}
+
+/// Return all config entries as (key, value) pairs (for show / effective config).
+pub fn get_all_config(conn: &Connection) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn
+        .prepare("SELECT key, value FROM config ORDER BY key;")
+        .map_err(|e| KrebslogError::Database(e.to_string()))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| KrebslogError::Database(e.to_string()))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| KrebslogError::Database(e.to_string()))?);
+    }
+    Ok(out)
+}
+
+/// Delete all config rows (used by config reset).
+pub fn reset_config(conn: &Connection) -> Result<()> {
+    conn.execute("DELETE FROM config;", [])
+        .map_err(|e| KrebslogError::Database(e.to_string()))?;
+    Ok(())
 }
