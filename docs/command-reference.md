@@ -108,7 +108,16 @@ Training oxidative load vs. dietary antioxidant support.
 krebslog report energy-balance --since "last 14 days" [--include-body-trends]
 ```
 
-Intake vs. expenditure. With `--include-body-trends`, krebslog pulls weight / body comp from bodylog (if available) and includes structured `body` stats (start/end/delta/trend/series) in the JSON output. See spec/03-bodylog.md.
+Intake vs. expenditure. With `--include-body-trends`, krebslog pulls weight / body comp from bodylog (if available) and includes structured `body` stats (start/end/delta/trend/series) in the JSON output plus a `body_validation` block with qualitative label and discrepancy severity. See spec/03-bodylog.md and spec/04-krebs-status.md.
+
+### report krebs-status
+
+```bash
+krebslog report krebs-status --since "last 14 days" [--until DATE] [--include-raw]
+krebslog report krebs-status --date today
+```
+
+Body-enhanced Krebs cycle status report. Flux (with components + formula), redox, energy + body_validation, body_adaptation (latest + trends + implication), insights, assumptions, and caveats. All derived values are transparent. `--include-raw` embeds the underlying nutlog/repslog/bodylog payloads. Single-day snapshots via `--date`. See spec/04-krebs-status.md for the full JSON contract and human layout.
 
 ### report correlations
 

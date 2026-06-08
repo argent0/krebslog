@@ -50,16 +50,15 @@ When the aggregation engine is complete, krebslog will maintain (in its optional
 ### Derived Values (computed by krebslog)
 
 - `energy_balance` (intake vs. estimated expenditure)
-- `krebs_flux_proxy` — weighted model combining:
-  - Carb availability (acetyl-CoA from carbs)
-  - Fat mobilization
-  - Protein anaplerosis
-  - Training metabolic demand
-- `redox_oxidative_load_score` — training ROS proxy
+- `krebs_flux_proxy` (0-10) — weighted model (carb availability + fat mobilization + protein anaplerosis + training demand) with component breakdown. See `report krebs-status` and spec/04.
+- `redox_oxidative_load_score` / balance — training ROS proxy vs. dietary antioxidant support
 - `antioxidant_adequacy` vs. load balance indicators
+- Body-validated signals (via bodylog):
+  - `body_validation` (weight/muscle deltas → energy equivalents using 7700/5500 factors, discrepancy severity, interpretation)
+  - `body_adaptation` (latest measurement + trends + implication for Krebs cycle function)
 - Other balance / adaptation signals
 
-All derived values are **transparent**. Under `--json` you will receive the raw inputs, the weights/formula used, and the final number, plus any config overrides that were active.
+All derived values are **transparent**. Under `--json` you will receive the raw inputs, the weights/formula used, and the final number, plus any config overrides that were active. `report krebs-status` surfaces the full integrated view with `assumptions`, `caveats`, and `insights`.
 
 ## Optional Local Cache
 

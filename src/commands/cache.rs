@@ -39,7 +39,8 @@ pub fn handle_cache(action: CacheAction, ctx: &Context) -> Result<()> {
                         "success": true,
                         "path": db_path.display().to_string(),
                         "exists": exists,
-                        "size_bytes": size
+                        "size_bytes": size,
+                        "note": "Will store daily grain + krebs_status / body_adaptation derived rows (spec/04 Phase 5) when aggregation is implemented."
                     })
                 );
             } else if !quiet {
@@ -47,7 +48,7 @@ pub fn handle_cache(action: CacheAction, ctx: &Context) -> Result<()> {
                 println!("  path:   {}", db_path.display());
                 println!("  exists: {}", exists);
                 println!("  size:   {} bytes", size);
-                println!("  (cache is optional and fully disableable with --no-cache)");
+                println!("  (stores optional daily + krebs/body derived aggregates; fully disableable with --no-cache)");
             }
         }
     }

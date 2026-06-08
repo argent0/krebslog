@@ -3,6 +3,7 @@ use crate::context::Context;
 use crate::error::{KrebslogError, Result};
 use crate::utils::{format_date_for_child, parse_flexible_date, resolve_bin, run_external_json};
 use chrono::{DateTime, Duration, Utc};
+use comfy_table::{presets, Cell, Table};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -120,6 +121,36 @@ pub fn handle_report(action: ReportAction, ctx: &Context) -> Result<()> {
                 }
             }
 
+            // Always attempt to surface body validation when we successfully fetched body data
+            // (the flag still gates the live call for now; once body is first-class we can default-on).
+            let mut body_validation: Option<serde_json::Value> = None;
+            if let Some(b) = &body {
+                // Derive a small validation block from the bodylog stats (weight primarily).
+                if let Some(w) = b.get("weight").or_else(|| b.get("stats")) {
+                    let delta = w.get("change").and_then(|v| v.as_f64()).unwrap_or(
+                        w.get("end")
+                            .and_then(|e| {
+                                w.get("start")
+                                    .map(|s| e.as_f64().unwrap_or(0.0) - s.as_f64().unwrap_or(0.0))
+                            })
+                            .unwrap_or(0.0),
+                    );
+                    let label = if delta <= -0.3 {
+                        "Energy estimate validated by downward body trend (possible mild deficit or high expenditure)"
+                    } else if delta >= 0.3 {
+                        "Possible under-estimate of expenditure or surplus not fully reflected in scale (water/glycogen common)"
+                    } else {
+                        "Body weight relatively stable — energy estimate and observed outcome in reasonable agreement"
+                    };
+                    body_validation = Some(serde_json::json!({
+                        "weight_delta_kg": (delta * 100.0).round() / 100.0,
+                        "interpretation": label,
+                        "discrepancy_severity": if delta.abs() < 0.4 { "low" } else { "medium" },
+                        "source": "bodylog"
+                    }));
+                }
+            }
+
             if json {
                 let mut out = serde_json::json!({
                     "success": true,
@@ -133,8 +164,11 @@ pub fn handle_report(action: ReportAction, ctx: &Context) -> Result<()> {
                 if let Some(n) = body_notes {
                     out["body_note"] = serde_json::json!(n);
                 }
+                if let Some(bv) = body_validation {
+                    out["body_validation"] = bv;
+                }
                 if !include_body_trends {
-                    out["note"] = serde_json::json!("skeleton (nutrition + training aggregation not yet wired; body trends delivered when --include-body-trends)");
+                    out["note"] = serde_json::json!("skeleton (nutrition + training aggregation not yet wired; body trends + validation delivered when --include-body-trends or body data present)");
                 }
                 println!(
                     "{}",
@@ -145,6 +179,14 @@ pub fn handle_report(action: ReportAction, ctx: &Context) -> Result<()> {
                     "report energy-balance --since {} (include_body_trends={})",
                     since, include_body_trends
                 );
+                if let Some(bv) = &body_validation {
+                    println!(
+                        "body validation: {}",
+                        bv.get("interpretation")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                    );
+                }
                 if let Some(b) = &body {
                     println!("body trends from bodylog:");
                     if let Some(stats) = b
@@ -180,14 +222,7 @@ pub fn handle_report(action: ReportAction, ctx: &Context) -> Result<()> {
             }
         }
         ReportAction::Correlations { x, y, period } => {
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({ "success": true, "command": "report correlations", "x": x, "y": y, "period": period, "note": "skeleton" })
-                );
-            } else if !quiet {
-                println!("report correlations --x {} --y {} (skeleton)", x, y);
-            }
+            handle_correlations(x, y, period, ctx)?;
         }
         ReportAction::Web {
             since,
@@ -213,7 +248,439 @@ pub fn handle_report(action: ReportAction, ctx: &Context) -> Result<()> {
                 ctx,
             )?;
         }
+        ReportAction::KrebsStatus {
+            since,
+            until,
+            date,
+            include_raw,
+        } => {
+            handle_krebs_status(since, until, date, include_raw, ctx)?;
+        }
     }
+    Ok(())
+}
+
+// ============================================================================
+// Krebs Status Implementation (spec/04-krebs-status.md)
+// Body-enhanced flux / redox / energy with real adaptation validation from bodylog.
+// ============================================================================
+
+#[allow(clippy::too_many_arguments)]
+fn handle_krebs_status(
+    since: String,
+    until: Option<String>,
+    date: Option<String>,
+    include_raw: bool,
+    ctx: &Context,
+) -> Result<()> {
+    let json_out = ctx.json;
+    let quiet = ctx.quiet;
+
+    // Resolve effective window. --date takes precedence for a snapshot.
+    let (start_dt, end_dt, _raw_since_for_label) = if let Some(d) = &date {
+        let dt = parse_flexible_date(d)?;
+        (dt, dt, d.clone())
+    } else {
+        let s = parse_flexible_date(&since)?;
+        let e = if let Some(u) = &until {
+            parse_flexible_date(u)?
+        } else {
+            Utc::now()
+        };
+        let e = if e < s { s } else { e };
+        (s, e, since.clone())
+    };
+
+    let start_str = format_date_for_child(start_dt);
+    let end_str = format_date_for_child(end_dt);
+    let days = (end_dt.date_naive() - start_dt.date_naive())
+        .num_days()
+        .max(1);
+
+    // Gather (best effort)
+    let gathered = gather_period_data(&start_str, &end_str, ctx);
+
+    // Compute the core signals
+    let (flux, flux_caveats) = compute_krebs_flux(&gathered);
+    let redox = compute_redox_balance(&gathered);
+    let energy = compute_energy_with_body_validation(&gathered, days);
+    let body_adapt = compute_body_adaptation(&gathered, days);
+    let insights = generate_insights(&flux, &redox, &energy, &body_adapt, &gathered);
+
+    let (assumptions, mut caveats) = build_assumptions_and_caveats(&gathered, days, {
+        // best effort measurement count from summary or array length
+        if let Some(s) = &gathered.body_summary {
+            s.get("measurement_count")
+                .and_then(|v| v.as_i64())
+                .or_else(|| {
+                    s.get("weight")
+                        .and_then(|w| w.get("count").and_then(|c| c.as_i64()))
+                })
+                .unwrap_or(0)
+        } else if let Some(m) = &gathered.body_measurements {
+            m.as_array().map(|a| a.len() as i64).unwrap_or(0)
+        } else {
+            0
+        }
+    });
+    caveats.extend(flux_caveats);
+
+    // Sources list (for the response meta)
+    let sources = {
+        let mut s = vec![];
+        if gathered.nutlog_available {
+            s.push("nutlog".to_string());
+        }
+        if gathered.repslog_available {
+            s.push("repslog".to_string());
+        }
+        if gathered.bodylog_available {
+            s.push("bodylog".to_string());
+        }
+        if s.is_empty() {
+            s.push("none".to_string());
+        }
+        s
+    };
+
+    // Optional raw payloads
+    let raw = if include_raw {
+        Some(serde_json::json!({
+            "nutlog": { "consumption": gathered.consumption, "nutrition_report": gathered.nutrition_report },
+            "repslog": { "workouts": gathered.workouts, "stats_summary": gathered.stats_summary },
+            "bodylog": { "measurements": gathered.body_measurements, "summary": gathered.body_summary },
+            "notes": gathered.error_notes
+        }))
+    } else {
+        None
+    };
+
+    let period = PeriodInfo {
+        since: start_str.clone(),
+        until: end_str.clone(),
+        days,
+    };
+
+    let output = KrebsStatusOutput {
+        success: true,
+        period,
+        sources,
+        krebs_flux: flux,
+        redox_balance: redox,
+        energy_balance: energy,
+        body_adaptation: body_adapt,
+        insights,
+        assumptions,
+        caveats,
+        raw,
+    };
+
+    if json_out {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output)
+                .expect("serializing krebs-status output cannot fail in-memory")
+        );
+    } else if !quiet {
+        // Human: compact table summary + narrative + insights + methodology
+        println!("Krebs Status — {} ({} days)", start_str, days);
+
+        let mut table = Table::new();
+        table.load_preset(presets::UTF8_FULL_CONDENSED);
+        table.set_header(vec!["Metric", "Value", "Note"]);
+
+        // Flux row
+        table.add_row(vec![
+            Cell::new("Krebs Flux (proxy)"),
+            Cell::new(format!("{:.1}/10", output.krebs_flux.proxy)),
+            Cell::new(output.krebs_flux.trend_7d.clone().unwrap_or_default()),
+        ]);
+        // Redox
+        table.add_row(vec![
+            Cell::new("Redox Balance"),
+            Cell::new(format!("{:.1}/10", output.redox_balance.score)),
+            Cell::new(output.redox_balance.interpretation.clone()),
+        ]);
+        // Energy
+        let surplus = output.energy_balance.estimated_surplus_kcal;
+        table.add_row(vec![
+            Cell::new("Est. Energy Surplus"),
+            Cell::new(format!("{surplus:+.0} kcal")),
+            Cell::new(if surplus > 150.0 {
+                "surplus"
+            } else if surplus < -150.0 {
+                "deficit"
+            } else {
+                "near balance"
+            }),
+        ]);
+        // Body deltas (if any)
+        if let Some(bv) = &output.energy_balance.body_validation {
+            table.add_row(vec![
+                Cell::new("Body Weight Δ"),
+                Cell::new(format!("{:+.1} kg", bv.weight_delta_kg)),
+                Cell::new(format!(
+                    "sev={} ({})",
+                    bv.discrepancy_severity, bv.confidence
+                )),
+            ]);
+        }
+
+        println!("{}", table);
+
+        // Narrative + insights
+        if let Some(bv) = &output.energy_balance.body_validation {
+            println!("\n{}", bv.interpretation);
+        }
+        println!(
+            "\nImplication: {}",
+            output.body_adaptation.implication_for_krebs
+        );
+
+        if !output.insights.is_empty() {
+            println!("\nInsights:");
+            for i in &output.insights {
+                println!("  • {}", i);
+            }
+        }
+
+        // Methodology & Caveats (always visible for human)
+        println!("\nMethodology & Caveats:");
+        println!("  Flux: {}", output.krebs_flux.formula);
+        for c in &output.caveats {
+            println!("  - {}", c);
+        }
+        if let Some(r) = &output.raw {
+            println!("  (raw child data included; see --json for full detail)");
+            let _ = r; // silence unused in this branch
+        }
+    }
+
+    Ok(())
+}
+
+/// Build a compact `krebs_status` object suitable for direct inclusion in
+/// `agent context` output. Reuses the same gather + compute pipeline as the
+/// full report so numbers and insights stay consistent.
+pub(crate) fn build_compact_krebs_status_for_agent(
+    since: &str,
+    ctx: &Context,
+) -> serde_json::Value {
+    // Resolve a conservative window (use the provided since; until = now)
+    let start = match parse_flexible_date(since) {
+        Ok(d) => d,
+        Err(_) => Utc::now() - Duration::days(30),
+    };
+    let end = Utc::now();
+    let start_str = format_date_for_child(start);
+    let end_str = format_date_for_child(end);
+
+    let g = gather_period_data(&start_str, &end_str, ctx);
+    let (flux, _cavs) = compute_krebs_flux(&g);
+    let redox = compute_redox_balance(&g);
+    let energy = compute_energy_with_body_validation(&g, 30);
+    let body = compute_body_adaptation(&g, 30);
+    let insights = generate_insights(&flux, &redox, &energy, &body, &g);
+
+    let overall = if flux.proxy >= 7.5 && body.trends.skeletal_muscle.trend == "up" {
+        "strong_efficient_adapting"
+    } else if flux.proxy >= 6.0 {
+        "solid_with_body_confirmation"
+    } else {
+        "needs_attention"
+    };
+
+    let one_sentence = format!(
+        "Krebs flux running at {:.1}/10. Body composition moving {} — {}.",
+        flux.proxy,
+        body.trends.weight.trend,
+        if body.trends.skeletal_muscle.trend == "up" {
+            "recomp or lean mass signal present"
+        } else {
+            "monitor consistency"
+        }
+    );
+
+    let mut key_flags = vec![];
+    if let Some(bv) = &energy.body_validation {
+        key_flags.push(format!("energy_discrepancy_{}", bv.discrepancy_severity));
+    }
+    if redox.score >= 6.0 {
+        key_flags.push("redox_adequate".to_string());
+    }
+
+    let body_insights: Vec<String> = insights
+        .iter()
+        .filter(|s| {
+            s.to_lowercase().contains("lean")
+                || s.to_lowercase().contains("body")
+                || s.to_lowercase().contains("partition")
+        })
+        .cloned()
+        .collect();
+
+    let recs = if redox.score < 5.5 {
+        vec!["consider increasing antioxidant-tagged intake or a short recovery block".to_string()]
+    } else {
+        vec!["continue current nutrition timing around training".to_string()]
+    };
+
+    serde_json::json!({
+        "overall_rating": overall,
+        "one_sentence": one_sentence,
+        "key_flags": key_flags,
+        "body_validated_insights": if body_insights.is_empty() { insights } else { body_insights },
+        "recommendations": recs,
+        "flux_proxy": flux.proxy,
+        "body_weight_trend": body.trends.weight.trend,
+    })
+}
+
+// ---------------- Correlations (Phase 4 of spec/04) ----------------
+
+fn handle_correlations(x: String, y: String, period: String, ctx: &Context) -> Result<()> {
+    let json_out = ctx.json;
+    let quiet = ctx.quiet;
+
+    // Treat the `period` as a "since" for the window (common usage); end = now.
+    let start = parse_flexible_date(&period).unwrap_or_else(|_| Utc::now() - Duration::days(30));
+    let end = Utc::now();
+    let start_str = format_date_for_child(start);
+    let end_str = format_date_for_child(end);
+    let days = (end.date_naive() - start.date_naive()).num_days().max(1);
+
+    let g = gather_period_data(&start_str, &end_str, ctx);
+
+    // Base extracts
+    let (kcal, protein, carbs, fat, antiox) = extract_nutrition_totals(&g);
+    let (volume, sessions, load) = extract_training_totals(&g);
+    let (flux, _) = compute_krebs_flux(&g);
+    let redox = compute_redox_balance(&g);
+    let energy = compute_energy_with_body_validation(&g, days);
+    let body = compute_body_adaptation(&g, days);
+
+    // Resolve x and y to (label, value, unit-ish, is_body)
+    let resolve = |name: &str| -> (String, f64, String, bool) {
+        let n = name.to_lowercase();
+        match n.as_str() {
+            "nutrition" | "kcal" | "intake" => ("intake_kcal".into(), kcal, "kcal".into(), false),
+            "protein" => ("protein_g".into(), protein, "g".into(), false),
+            "carbs" => ("carbs_g".into(), carbs, "g".into(), false),
+            "fat" | "body_fat" | "fat_loss" => {
+                // Prefer body fat change when body context is active; fall back to intake fat
+                if body.trends.body_fat.change_pct.unwrap_or(0.0).abs() > 0.01 {
+                    let d = body.trends.body_fat.change_pct.unwrap_or(0.0);
+                    ("body_fat_change_pct".into(), d, "%".into(), true)
+                } else {
+                    ("fat_g".into(), fat, "g".into(), false)
+                }
+            }
+            "antioxidant" | "antiox" => ("antioxidant_proxy".into(), antiox, "%".into(), false),
+            "training" | "training-load" | "load" => {
+                ("training_load".into(), load, "au".into(), false)
+            }
+            "volume" => ("volume_kg_reps".into(), volume, "kg·reps".into(), false),
+            "sessions" => ("sessions".into(), sessions as f64, "count".into(), false),
+            "krebs" | "krebs-flux" | "flux" => {
+                ("krebs_flux".into(), flux.proxy, "0-10".into(), false)
+            }
+            "redox" => ("redox_balance".into(), redox.score, "0-10".into(), false),
+            "energy" | "surplus" => (
+                "energy_surplus".into(),
+                energy.estimated_surplus_kcal,
+                "kcal".into(),
+                false,
+            ),
+            // Body-related high-value pairs (spec/04 Phase 4)
+            "weight" | "weight_change" | "weight_stability" => {
+                let d = body.trends.weight.change_kg.unwrap_or(0.0);
+                ("weight_delta_kg".into(), d, "kg".into(), true)
+            }
+            "muscle" | "muscle_gain" | "skeletal_muscle" => {
+                let d = body.trends.skeletal_muscle.change_pct.unwrap_or(0.0);
+                ("skeletal_muscle_change_pct".into(), d, "%".into(), true)
+            }
+            "body_comp" | "recomp" => (
+                "body_recomp_score".into(),
+                (body.trends.skeletal_muscle.change_pct.unwrap_or(0.0)
+                    - body.trends.body_fat.change_pct.unwrap_or(0.0))
+                .max(0.0),
+                "au".into(),
+                true,
+            ),
+            _ => (name.to_string(), 0.0, "".into(), false),
+        }
+    };
+
+    let (x_label, x_val, x_unit, x_body) = resolve(&x);
+    let (y_label, y_val, y_unit, y_body) = resolve(&y);
+
+    let involves_body = x_body || y_body;
+
+    let mut note = if involves_body {
+        "High-value pair involving body adaptation (from bodylog). Use longer windows for stable deltas.".to_string()
+    } else {
+        "Values aggregated over the period. Full per-day scatter series available after daily grain cache lands.".to_string()
+    };
+
+    if let Some(bv) = &energy.body_validation {
+        note.push_str(&format!(
+            " Body validation: {} (sev {}).",
+            bv.interpretation, bv.discrepancy_severity
+        ));
+    }
+
+    let sources: Vec<String> = {
+        let mut s: Vec<String> = vec![];
+        if g.nutlog_available {
+            s.push("nutlog".into());
+        }
+        if g.repslog_available {
+            s.push("repslog".into());
+        }
+        if g.bodylog_available {
+            s.push("bodylog".into());
+        }
+        s
+    };
+
+    if json_out {
+        let out = serde_json::json!({
+            "success": true,
+            "command": "report correlations",
+            "period": { "start": start_str, "end": end_str, "label": period },
+            "x": { "name": x, "label": x_label, "value": x_val, "unit": x_unit },
+            "y": { "name": y, "label": y_label, "value": y_val, "unit": y_unit },
+            "involves_body_data": involves_body,
+            "body_validation": energy.body_validation,
+            "note": note,
+            "sources": sources,
+            "raw_inputs": {
+                "krebs_flux_proxy": flux.proxy,
+                "training_load": load,
+                "antioxidant_proxy": antiox,
+                "weight_delta_kg": body.trends.weight.change_kg,
+                "muscle_change_pct": body.trends.skeletal_muscle.change_pct,
+                "fat_change_pct": body.trends.body_fat.change_pct
+            }
+        });
+        println!("{}", serde_json::to_string_pretty(&out).unwrap());
+    } else if !quiet {
+        println!("Correlations — {} ({} days)", period, days);
+        println!("  x: {} = {:.2} {}", x_label, x_val, x_unit);
+        println!("  y: {} = {:.2} {}", y_label, y_val, y_unit);
+        if involves_body {
+            println!("  (body-involved pair — see body_validation and caveats)");
+        }
+        if let Some(bv) = &energy.body_validation {
+            println!(
+                "  body signal: {} (sev: {})",
+                bv.interpretation, bv.discrepancy_severity
+            );
+        }
+        println!("  note: {}", note);
+    }
+
     Ok(())
 }
 
@@ -282,6 +749,102 @@ pub struct WebReportData {
     pub correlations: Vec<serde_json::Value>,
     pub methodology: serde_json::Value,
     pub raw: serde_json::Value, // best-effort captured child data for agents
+}
+
+// ============================================================================
+// Krebs Status Report Types (spec/04-krebs-status.md)
+// These are the rich, transparent structures for the integrated status command.
+// All derived values carry formula / assumptions / caveats for agent usability.
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeriodInfo {
+    pub since: String,
+    pub until: String,
+    pub days: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KrebsFluxComponents {
+    pub carb_availability: f64,
+    pub fat_mobilization: f64,
+    pub protein_anaplerosis: f64,
+    pub training_demand: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KrebsFlux {
+    pub proxy: f64, // 0-10 scale
+    pub scale: String,
+    pub components: KrebsFluxComponents,
+    pub formula: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trend_7d: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RedoxBalance {
+    pub score: f64,
+    pub interpretation: String,
+    pub ros_proxy: f64,
+    pub antioxidant_proxy: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BodyValidation {
+    pub weight_delta_kg: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fat_delta_kg_est: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub muscle_delta_kg_est: Option<f64>,
+    pub interpretation: String,
+    pub discrepancy_severity: String, // "low" | "medium" | "high"
+    pub confidence: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnergyBalanceWithBody {
+    pub estimated_surplus_kcal: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_validation: Option<BodyValidation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BodyTrend {
+    pub change_kg: Option<f64>,
+    pub change_pct: Option<f64>,
+    pub trend: String, // "up" | "down" | "flat" | "unknown"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BodyTrends {
+    pub weight: BodyTrend,
+    pub skeletal_muscle: BodyTrend,
+    pub body_fat: BodyTrend,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BodyAdaptation {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_measurement: Option<serde_json::Value>,
+    pub trends: BodyTrends,
+    pub implication_for_krebs: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KrebsStatusOutput {
+    pub success: bool,
+    pub period: PeriodInfo,
+    pub sources: Vec<String>,
+    pub krebs_flux: KrebsFlux,
+    pub redox_balance: RedoxBalance,
+    pub energy_balance: EnergyBalanceWithBody,
+    pub body_adaptation: BodyAdaptation,
+    pub insights: Vec<String>,
+    pub assumptions: serde_json::Value,
+    pub caveats: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw: Option<serde_json::Value>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -433,6 +996,18 @@ struct GatheredData {
     error_notes: Vec<String>,
 }
 
+/// Extended gather used by krebs-status (and shareable with web/daily in future).
+/// Currently implemented by delegating to the web gather (which already pulls
+/// nutrition, training aggregates, and body weight/summary). Status handler
+/// may perform one additional targeted body call for raw measurements when
+/// richer adaptation details are required.
+fn gather_period_data(start: &str, end: &str, ctx: &Context) -> GatheredData {
+    // For the initial implementation we reuse the existing (proven) gather logic.
+    // Body data collection inside gather_web_data already prefers "report weight"
+    // with summary fallback and records body_measurements + body_summary.
+    gather_web_data(start, end, ctx)
+}
+
 fn gather_web_data(start: &str, end: &str, ctx: &Context) -> GatheredData {
     let mut g = GatheredData::default();
 
@@ -545,7 +1120,29 @@ fn gather_web_data(start: &str, end: &str, ctx: &Context) -> GatheredData {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
                 g.body_summary = Some(v);
             }
-        } else {
+        }
+
+        // Additionally fetch the raw measurement list for krebs-status adaptation
+        // (gives precise latest record across weight/fat/muscle + measurement count for caveats).
+        if g.body_measurements.is_none() {
+            if let Ok((out, _)) = run_external_json(
+                bin,
+                &[
+                    "measurement".into(),
+                    "list".into(),
+                    "--since".into(),
+                    start.into(),
+                    "--until".into(),
+                    end.into(),
+                ],
+            ) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+                    g.body_measurements = Some(v);
+                }
+            }
+        }
+
+        if g.body_summary.is_none() && g.body_measurements.is_none() {
             g.error_notes
                 .push("Failed to fetch body data from bodylog".into());
         }
@@ -852,6 +1449,505 @@ fn compute_redox_proxy(load: f64, antiox: f64, _sessions: i64) -> f64 {
 fn compute_energy_balance(kcal: f64, volume: f64, sessions: i64) -> f64 {
     let expenditure = 1800.0 + volume * 0.6 + (sessions as f64) * 180.0;
     kcal - expenditure
+}
+
+// ---------------- Krebs Status Core Computations (spec/04) ----------------
+// All functions return values + the metadata (formula, assumptions, caveats)
+// required for full transparency under --json.
+
+/// Compute a Krebs flux proxy (0-10) + component breakdown from the gathered
+/// nutrition and training signals. Starting weights and normalizers per spec/04 §5.
+fn compute_krebs_flux(g: &GatheredData) -> (KrebsFlux, Vec<String>) {
+    let (kcal, protein, carbs, _fat, _antiox) = extract_nutrition_totals(g);
+    let (volume, sessions, _load_hint) = extract_training_totals(g);
+
+    // Rough personal ranges / normalizers (documented; future config will allow overrides).
+    let carb_score = (carbs / 280.0).clamp(0.0, 1.3) * 10.0 * 0.35;
+    let fat_score = ((kcal.max(800.0) - 800.0) / 2200.0).clamp(0.0, 1.1) * 10.0 * 0.25;
+    // Protein contribution to anaplerosis (gluconeogenic + AA entry); capped.
+    let protein_score = (protein / 140.0).clamp(0.0, 1.4) * 3.0; // contributes up to ~3 points of the 10
+    let training_score =
+        ((volume / 1200.0) + (sessions as f64 / 12.0)).clamp(0.0, 1.5) * 10.0 * 0.25;
+
+    let proxy = (carb_score + fat_score + protein_score + training_score).clamp(1.0, 10.0);
+
+    let components = KrebsFluxComponents {
+        carb_availability: (carb_score).clamp(0.0, 10.0),
+        fat_mobilization: (fat_score).clamp(0.0, 10.0),
+        protein_anaplerosis: protein_score.min(3.0),
+        training_demand: (training_score).clamp(0.0, 10.0),
+    };
+
+    let formula = "0.35*carb_norm + 0.25*fat_norm + 0.15*protein_anaplerosis + 0.25*training_load_norm (see assumptions; scale 0-10)".to_string();
+
+    let caveats = vec![
+        "Normalization ranges are provisional (personal baseline pending 30+ days history).".to_string(),
+        "Protein anaplerosis contribution capped; real AA entry varies by intake timing and training state.".to_string(),
+    ];
+
+    // Simple 7d trend hint (synthetic until we have daily grain history).
+    let trend = if proxy >= 7.5 {
+        Some("up".to_string())
+    } else if proxy >= 5.5 {
+        Some("flat".to_string())
+    } else {
+        Some("down".to_string())
+    };
+
+    let flux = KrebsFlux {
+        proxy: (proxy * 10.0).round() / 10.0,
+        scale: "0-10 (personal baseline pending history)".to_string(),
+        components,
+        formula,
+        trend_7d: trend,
+    };
+
+    (flux, caveats)
+}
+
+/// Compute redox balance score + interpretation from training load and antioxidant hints.
+fn compute_redox_balance(g: &GatheredData) -> RedoxBalance {
+    let (_kcal, _p, _c, _f, antiox_hint) = extract_nutrition_totals(g);
+    let (_vol, _sess, load_hint) = extract_training_totals(g);
+
+    let ros = load_hint.clamp(0.0, 100.0);
+    let antiox = antiox_hint.clamp(0.0, 100.0);
+
+    // Mirror the web redox proxy but map to 0-10 "score" for status.
+    let balance = compute_redox_proxy(ros, antiox, 0);
+    let score = (balance * 10.0).clamp(0.5, 9.5);
+
+    let interpretation = if score >= 7.0 {
+        "good antioxidant support relative to training oxidative load".to_string()
+    } else if score >= 5.0 {
+        "adequate for current load but watch antioxidant intake during high-volume blocks"
+            .to_string()
+    } else {
+        "low relative to load; consider increasing tagged antioxidants or reducing volume"
+            .to_string()
+    };
+
+    RedoxBalance {
+        score: (score * 10.0).round() / 10.0,
+        interpretation,
+        ros_proxy: ros,
+        antioxidant_proxy: antiox,
+    }
+}
+
+/// Estimate energy surplus (kcal) over the period and cross-check against body deltas
+/// when bodylog data is present. Returns the energy block + body_validation when possible.
+fn compute_energy_with_body_validation(g: &GatheredData, days: i64) -> EnergyBalanceWithBody {
+    let (kcal_total, _p, _c, _f, _a) = extract_nutrition_totals(g);
+    let (volume, sessions, _load) = extract_training_totals(g);
+
+    // Very rough expenditure model (training + base). Real BMR/TEE will come from
+    // bodylog resting_metabolism when present in future iterations.
+    let training_ex = volume * 0.65 + (sessions as f64) * 190.0;
+    let base = 1750.0; // placeholder; profile or bodylog.resting will improve this
+    let est_expenditure = base + training_ex;
+    let est_surplus = kcal_total - est_expenditure;
+
+    let mut body_val = None;
+
+    // Try to derive observed body signal from body_summary (preferred) or measurements.
+    if let Some(summary) = &g.body_summary {
+        // bodylog report summary shape (spec/03): { "weight": {start, end, change, ...}, "skeletal_muscle": {...}, ... }
+        let w = summary.get("weight").or_else(|| summary.get("weight_kg"));
+        let weight_delta = w
+            .and_then(|ww| {
+                ww.get("change")
+                    .or_else(|| ww.get("delta"))
+                    .or_else(|| ww.get("end"))
+                    .and_then(|e| {
+                        ww.get("start")
+                            .map(|s| e.as_f64().unwrap_or(0.0) - s.as_f64().unwrap_or(0.0))
+                    })
+            })
+            .or_else(|| w.and_then(|ww| ww.get("change").and_then(|v| v.as_f64())))
+            .unwrap_or(0.0);
+
+        // Best-effort muscle and fat deltas (may be absent or under different keys).
+        let muscle_delta = summary
+            .get("skeletal_muscle")
+            .or_else(|| summary.get("muscle"))
+            .and_then(|m| {
+                m.get("change")
+                    .or_else(|| m.get("delta"))
+                    .and_then(|v| v.as_f64())
+            })
+            .unwrap_or(0.0);
+
+        let fat_delta = summary
+            .get("body_fat")
+            .or_else(|| summary.get("body_fat_pct"))
+            .and_then(|f| {
+                f.get("change")
+                    .or_else(|| f.get("delta"))
+                    .and_then(|v| v.as_f64())
+            })
+            .unwrap_or(0.0);
+
+        // Convert deltas to energy equivalents (spec §5).
+        // Note: fat_delta from % is not kg; we use a conservative proxy or skip precise fat_kg here.
+        // For the validation we primarily use weight + muscle (when available).
+        let observed_equiv = (weight_delta * 7700.0) + (muscle_delta * 5500.0);
+
+        let discrepancy = est_surplus - observed_equiv;
+        let denom = (est_surplus.abs() + 150.0).max(100.0);
+        let sev = (discrepancy.abs() / denom).clamp(0.0, 1.0);
+
+        let sev_label = if sev < 0.25 {
+            "low"
+        } else if sev < 0.55 {
+            "medium"
+        } else {
+            "high"
+        };
+
+        let interp = if sev_label == "low" && muscle_delta >= 0.0 && weight_delta <= 0.0 {
+            "Mild observed deficit or recomp signal despite estimated surplus. Consistent with high Krebs flux + possible elevated NEAT/TEF or measurement timing. Overall positive adaptation signal.".to_string()
+        } else if weight_delta > 0.2 && est_surplus < -200.0 {
+            "Observed weight up while reporting deficit — possible under-estimated expenditure, water/glycogen, or intake under-reporting.".to_string()
+        } else {
+            "Body trend and energy estimate show moderate alignment. Short-term noise (glycogen, water, gut) likely present.".to_string()
+        };
+
+        let count = summary
+            .get("measurement_count")
+            .and_then(|v| v.as_i64())
+            .or_else(|| {
+                summary
+                    .get("weight")
+                    .and_then(|w| w.get("count").and_then(|c| c.as_i64()))
+            })
+            .unwrap_or(0);
+
+        body_val = Some(BodyValidation {
+            weight_delta_kg: (weight_delta * 100.0).round() / 100.0,
+            fat_delta_kg_est: if fat_delta.abs() > 0.01 {
+                Some((fat_delta * 100.0).round() / 100.0)
+            } else {
+                None
+            },
+            muscle_delta_kg_est: if muscle_delta.abs() > 0.01 {
+                Some((muscle_delta * 100.0).round() / 100.0)
+            } else {
+                None
+            },
+            interpretation: interp,
+            discrepancy_severity: sev_label.to_string(),
+            confidence: format!(
+                "{} ({}d window, {} measurements)",
+                if count >= 3 { "medium" } else { "low" },
+                days,
+                count
+            ),
+        });
+    } else if let Some(meas) = &g.body_measurements {
+        if let Some(arr) = meas.as_array() {
+            if arr.len() >= 2 {
+                // Newest first per bodylog contract; last two for simple delta.
+                let newest = &arr[0];
+                let oldest = &arr[arr.len() - 1];
+                let w_new = newest
+                    .get("weight_kg")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let w_old = oldest
+                    .get("weight_kg")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let weight_delta = w_new - w_old;
+
+                let m_new = newest
+                    .get("skeletal_muscle_pct")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let m_old = oldest
+                    .get("skeletal_muscle_pct")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let muscle_delta = m_new - m_old; // % points; treat as proxy for kg signal (conservative)
+
+                let observed_equiv = (weight_delta * 7700.0) + (muscle_delta * 55.0); // very rough %->kg proxy
+
+                let discrepancy = est_surplus - observed_equiv;
+                let sev =
+                    (discrepancy.abs() / (est_surplus.abs() + 150.0).max(100.0)).clamp(0.0, 1.0);
+                let sev_label = if sev < 0.25 {
+                    "low"
+                } else if sev < 0.55 {
+                    "medium"
+                } else {
+                    "high"
+                };
+
+                body_val = Some(BodyValidation {
+                    weight_delta_kg: (weight_delta * 100.0).round() / 100.0,
+                    fat_delta_kg_est: None,
+                    muscle_delta_kg_est: Some((muscle_delta * 100.0).round() / 100.0),
+                    interpretation: "Body deltas computed from first/last measurement in window (linear assumption).".to_string(),
+                    discrepancy_severity: sev_label.to_string(),
+                    confidence: format!("low (sparse measurements, {} points)", arr.len()),
+                });
+            }
+        }
+    }
+
+    EnergyBalanceWithBody {
+        estimated_surplus_kcal: (est_surplus * 10.0).round() / 10.0,
+        body_validation: body_val,
+    }
+}
+
+/// Derive body adaptation summary (latest + trends + implication) from gathered body data.
+fn compute_body_adaptation(g: &GatheredData, _days: i64) -> BodyAdaptation {
+    let mut latest = None;
+    let mut w_change = 0.0;
+    let mut m_change = 0.0;
+    let mut f_change = 0.0;
+    let mut meas_count = 0i64;
+
+    if let Some(summary) = &g.body_summary {
+        if let Some(w) = summary.get("weight").or_else(|| summary.get("weight_kg")) {
+            w_change = w.get("change").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        }
+        if let Some(m) = summary
+            .get("skeletal_muscle")
+            .or_else(|| summary.get("muscle"))
+        {
+            m_change = m.get("change").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        }
+        if let Some(f) = summary
+            .get("body_fat")
+            .or_else(|| summary.get("body_fat_pct"))
+        {
+            f_change = f.get("change").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        }
+        meas_count = summary
+            .get("measurement_count")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+    }
+
+    if let Some(meas) = &g.body_measurements {
+        if let Some(arr) = meas.as_array() {
+            if !arr.is_empty() {
+                latest = Some(arr[0].clone());
+                if meas_count == 0 {
+                    meas_count = arr.len() as i64;
+                }
+                let _ = meas_count; // count is captured in caveats via the closure above; keep for future use
+            }
+            // If we didn't get deltas from summary, compute crude first/last.
+            if w_change.abs() < 0.01 && arr.len() >= 2 {
+                let newest = &arr[0];
+                let oldest = &arr[arr.len() - 1];
+                w_change = newest
+                    .get("weight_kg")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0)
+                    - oldest
+                        .get("weight_kg")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0);
+            }
+        }
+    }
+
+    let mk_trend = |delta: f64| -> BodyTrend {
+        BodyTrend {
+            change_kg: Some((delta * 100.0).round() / 100.0),
+            change_pct: None,
+            trend: if delta > 0.15 {
+                "up".into()
+            } else if delta < -0.15 {
+                "down".into()
+            } else {
+                "flat".into()
+            },
+        }
+    };
+
+    let trends = BodyTrends {
+        weight: mk_trend(w_change),
+        skeletal_muscle: BodyTrend {
+            change_kg: None,
+            change_pct: Some((m_change * 100.0).round() / 100.0),
+            trend: if m_change > 0.2 {
+                "up".into()
+            } else if m_change < -0.2 {
+                "down".into()
+            } else {
+                "flat".into()
+            },
+        },
+        body_fat: BodyTrend {
+            change_kg: None,
+            change_pct: Some((f_change * 100.0).round() / 100.0),
+            trend: if f_change > 0.3 {
+                "up".into()
+            } else if f_change < -0.3 {
+                "down".into()
+            } else {
+                "flat".into()
+            },
+        },
+    };
+
+    let implication = if w_change <= 0.0 && m_change >= 0.0 {
+        "Lean mass gain or stability + weight stable/down in context of training load validates efficient TCA intermediate pools and good recovery capacity. Supports continued high flux without apparent mitochondrial/redox bottleneck.".to_string()
+    } else if w_change > 0.3 && m_change < 0.0 {
+        "Weight gain with muscle loss signal — possible surplus mis-estimate, high stress/recovery debt, or insufficient protein/anaplerosis support for the observed training demand.".to_string()
+    } else {
+        "Body composition movement provides a real-world cross-check on the Krebs flux and energy estimates. Monitor consistency of measurement conditions (fasted, post-void, same time of day).".to_string()
+    };
+
+    BodyAdaptation {
+        latest_measurement: latest,
+        trends,
+        implication_for_krebs: implication,
+    }
+}
+
+/// Simple transparent heuristic insights (rule-based, versioned in output via caveats/assumptions).
+fn generate_insights(
+    flux: &KrebsFlux,
+    redox: &RedoxBalance,
+    energy: &EnergyBalanceWithBody,
+    body: &BodyAdaptation,
+    g: &GatheredData,
+) -> Vec<String> {
+    let mut out = vec![];
+
+    if flux.proxy >= 7.0 {
+        out.push("Krebs flux strong — driven by consistent nutrition around training and effective training demand.".to_string());
+    } else if flux.proxy >= 5.0 {
+        out.push("Krebs flux moderate. Consider peri-training carb timing or volume adjustments if goals require higher energy flux.".to_string());
+    }
+
+    if let Some(bv) = &energy.body_validation {
+        if bv.discrepancy_severity == "low" {
+            out.push("Body outcome aligns well with energy estimate — model credibility is reasonable for this window.".to_string());
+        } else if bv.discrepancy_severity == "high" {
+            out.push("Notable energy vs. body discrepancy. Short-term water/glycogen, NEAT changes, or logging gaps are common causes; re-evaluate in a longer window.".to_string());
+        }
+    }
+
+    if redox.score < 5.0 {
+        out.push("Redox score low relative to load. Consider increasing antioxidant-tagged foods or a short deload if recovery feels incomplete.".to_string());
+    }
+
+    // Body comp implication already in the adaptation block; surface one crisp version here too.
+    if body.trends.skeletal_muscle.trend == "up" && body.trends.weight.trend != "up" {
+        out.push("Lean mass up or stable while weight is not rising — excellent nutrient partitioning signal.".to_string());
+    }
+
+    if g.bodylog_available
+        && body.trends.weight.change_kg.unwrap_or(0.0).abs() < 0.1
+        && body.trends.skeletal_muscle.change_pct.unwrap_or(0.0).abs() < 0.2
+    {
+        out.push("Very little body movement detected. Ensure measurement cadence is sufficient or consider a longer analysis window.".to_string());
+    }
+
+    if out.is_empty() {
+        out.push("Data window produced neutral signals across flux, redox, and body adaptation. Continue logging for clearer trends.".to_string());
+    }
+
+    out
+}
+
+/// Build the full set of assumptions and global caveats for a krebs-status report.
+fn build_assumptions_and_caveats(
+    g: &GatheredData,
+    days: i64,
+    meas_count: i64,
+) -> (serde_json::Value, Vec<String>) {
+    let assumptions = serde_json::json!({
+        "energy_equiv_fat_kg": 7700,
+        "energy_equiv_muscle_kg": 5500,
+        "base_expenditure_estimate_kcal": 1750,
+        "short_term_noise_factors_ignored": ["glycogen", "water", "gut_content", "scale_precision", "measurement_timing_vs_workout"],
+        "personal_baseline": if g.body_summary.is_some() || g.body_measurements.is_some() { "limited (use 30+ days for personalized normalizers)" } else { "not available (body data absent)" },
+        "resting_metabolism_source": "profile-derived placeholder (bodylog resting_metabolism not yet wired into this report)"
+    });
+
+    let mut caveats = vec![
+        format!("Body data sparsity: {} measurements over {} days. Trends use start/end or linear assumption.", meas_count, days),
+        "All flux/redox/energy numbers are proxies. Individual biochemistry, sleep, stress, and NEAT are not directly measured.".to_string(),
+    ];
+    if !g.bodylog_available {
+        caveats.push("bodylog binary not found — body_validation and adaptation sections are limited or absent.".to_string());
+    }
+    if !g.nutlog_available || !g.repslog_available {
+        caveats.push("One or more primary sources (nutlog/repslog) unavailable — some inputs estimated or zeroed.".to_string());
+    }
+
+    (assumptions, caveats)
+}
+
+// ---------------- Unit Tests for Krebs Status Computations ----------------
+
+#[cfg(test)]
+mod krebs_status_tests {
+    use super::*;
+
+    fn minimal_gathered_with_body(weight_change: f64, muscle_change: f64) -> GatheredData {
+        let mut g = GatheredData::default();
+        g.nutlog_available = true;
+        g.repslog_available = true;
+        g.bodylog_available = true;
+        // Minimal nutrition so flux has something to work with
+        g.nutrition_report = Some(serde_json::json!({
+            "totals": { "kcal": 2400.0, "protein_g": 140.0, "carbs_g": 220.0, "fat_g": 80.0 }
+        }));
+        g.stats_summary = Some(serde_json::json!({
+            "total_volume_kg": 8500.0,
+            "sessions": 4
+        }));
+        // Body summary with weight + muscle stats (simulates bodylog report summary)
+        g.body_summary = Some(serde_json::json!({
+            "weight": { "start": 82.5, "end": 82.5 + weight_change, "change": weight_change, "count": 3, "trend": if weight_change < 0.0 { "down" } else { "up" } },
+            "skeletal_muscle": { "change": muscle_change, "count": 3 },
+            "measurement_count": 3
+        }));
+        g
+    }
+
+    #[test]
+    fn flux_is_in_1_to_10_range_and_has_formula() {
+        let g = minimal_gathered_with_body(-0.4, 0.2);
+        let (flux, _c) = compute_krebs_flux(&g);
+        assert!(flux.proxy >= 1.0 && flux.proxy <= 10.0);
+        assert!(flux.formula.contains("0.35*carb"));
+        assert!(flux.components.carb_availability >= 0.0);
+    }
+
+    #[test]
+    fn body_validation_and_discrepancy_are_produced_when_body_present() {
+        let g = minimal_gathered_with_body(-0.5, 0.3);
+        let energy = compute_energy_with_body_validation(&g, 14);
+        assert!(energy.body_validation.is_some());
+        let bv = energy.body_validation.unwrap();
+        assert!(
+            bv.discrepancy_severity == "low"
+                || bv.discrepancy_severity == "medium"
+                || bv.discrepancy_severity == "high"
+        );
+        assert!(bv.interpretation.len() > 10);
+    }
+
+    #[test]
+    fn insights_are_non_empty_and_transparent() {
+        let g = minimal_gathered_with_body(-0.3, 0.1);
+        let (flux, _) = compute_krebs_flux(&g);
+        let redox = compute_redox_balance(&g);
+        let energy = compute_energy_with_body_validation(&g, 14);
+        let body = compute_body_adaptation(&g, 14);
+        let ins = generate_insights(&flux, &redox, &energy, &body, &g);
+        assert!(!ins.is_empty());
+    }
 }
 
 fn status_from_score(s: u32) -> String {

@@ -200,6 +200,28 @@ pub enum ReportAction {
         include_body_trends: bool,
     },
 
+    /// Integrated Krebs (TCA) cycle status: flux + redox + energy with body adaptation validation.
+    ///
+    /// Uses bodylog measurements (weight, body comp) as real-world outcome signals to validate
+    /// or challenge estimated flux, energy balance, and redox models. Produces transparent
+    /// formulas, assumptions, caveats, and actionable insights.
+    #[command(name = "krebs-status")]
+    KrebsStatus {
+        /// Start of period (flexible: today, last 14 days, 2026-05-20, last monday, ...).
+        #[arg(long, default_value = "last 14 days")]
+        since: String,
+        /// End of period (inclusive). Defaults to today.
+        #[arg(long)]
+        until: Option<String>,
+        /// Convenience single-day snapshot (equivalent to --since DATE --until DATE).
+        #[arg(long)]
+        date: Option<String>,
+
+        /// Include raw child payloads (nutlog/repslog/bodylog responses) in the output.
+        #[arg(long)]
+        include_raw: bool,
+    },
+
     /// Correlations between nutrition inputs and training outputs.
     Correlations {
         #[arg(long, default_value = "nutrition")]
@@ -260,6 +282,9 @@ pub enum ImageAction {
         output: Option<String>,
         #[arg(long, value_parser = ["light", "dark"], default_value = "dark")]
         theme: String,
+        /// Include body adaptation deltas / alignment callout when bodylog data is available.
+        #[arg(long)]
+        include_body_context: bool,
     },
 
     /// Training load calendar-style heatmap.
@@ -307,7 +332,7 @@ pub enum TelegramAction {
 
     /// Generic report exporter tuned for Telegram (caption + image).
     Report {
-        #[arg(long, value_parser = ["daily", "redox", "krebs", "energy"])]
+        #[arg(long, value_parser = ["daily", "redox", "krebs", "krebs-status", "energy"])]
         r#type: String,
         #[arg(long, default_value = "last 7 days")]
         period: String,

@@ -147,7 +147,11 @@ fn handle_status(probe: bool, ctx: &Context) -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "success": true,
-                "sources": sources
+                "sources": sources,
+                "derived": {
+                    "krebs_status": "computed on demand from live pulls (body-validated flux/redox/energy/adaptation per spec/04)",
+                    "cache_note": "full persistence of krebs + body aggregates when daily grain lands (Phase 5)"
+                }
             }))
             .expect("serializing a freshly constructed in-memory Value cannot fail")
         );

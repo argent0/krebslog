@@ -58,10 +58,11 @@ krebslog --json report daily --date today --include-image
 krebslog --json report krebs-flux --period 14d
 krebslog --json report redox-balance --since "last 7 days"
 krebslog --json report energy-balance --since "last 14 days"
+krebslog --json report krebs-status --since "last 14 days"   # body-validated flux + adaptation (recommended)
 krebslog --json report correlations --x nutrition --y training-load --period 30d
 ```
 
-Under `--json` these will (when fully implemented) include the raw series, the computed stats, and the exact formulas/assumptions that were used for any derived scores.
+Under `--json` these will (when fully implemented) include the raw series, the computed stats, and the exact formulas/assumptions that were used for any derived scores. `report krebs-status` is the richest single call for agents that need flux + body outcome validation in one payload.
 
 ## Visuals & Telegram Bundles
 

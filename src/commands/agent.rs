@@ -1,4 +1,5 @@
 use crate::cli::{AgentAction, AgentSkillsAction};
+use crate::commands::report::build_compact_krebs_status_for_agent;
 use crate::context::Context;
 use crate::error::Result;
 use crate::utils::{resolve_bin, run_external_json};
@@ -39,6 +40,9 @@ pub fn handle_agent(action: AgentAction, ctx: &Context) -> Result<()> {
                 }
             }
 
+            // Build a compact krebs_status using the shared (body-validated) pipeline.
+            let krebs_status = build_compact_krebs_status_for_agent(&since, ctx);
+
             if json {
                 let mut payload = serde_json::json!({
                     "success": true,
@@ -47,16 +51,12 @@ pub fn handle_agent(action: AgentAction, ctx: &Context) -> Result<()> {
                     "since": since,
                     "output": output,
                     "bodylog_available": body_available,
+                    "krebs_status": krebs_status,
                 });
                 if let Some(b) = body_latest {
                     payload["body"] = serde_json::json!({ "latest": b });
                 } else if body_available {
                     payload["body"] = serde_json::json!({ "available": true, "note": "no recent measurement for 'today'" });
-                }
-                if body_available {
-                    payload["note"] = serde_json::json!(
-                        "skeleton — nutrition + training + redox + body (when present) bundle"
-                    );
                 }
                 println!(
                     "{}",
@@ -64,7 +64,7 @@ pub fn handle_agent(action: AgentAction, ctx: &Context) -> Result<()> {
                 );
             } else if !quiet {
                 println!(
-                    "agent context --for {} --since {} (skeleton, bodylog_available={})",
+                    "agent context --for {} --since {} (bodylog_available={}, krebs_status included)",
                     r#for, since, body_available
                 );
             }

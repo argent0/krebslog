@@ -79,12 +79,14 @@ Even in the current skeleton you can exercise the command surface:
 ```bash
 krebslog --json report daily --date today
 krebslog --json report krebs-flux --period 14d
+krebslog --json report krebs-status --since "last 14 days"   # recommended: body-validated flux + adaptation (uses bodylog)
 krebslog --json report redox-balance --since "last 7 days"
+krebslog --json report correlations --x training-load --y muscle_gain --period "last 30 days"
 ```
 
 Human-readable (non-JSON) output is also supported for quick inspection.
 
-Full reports (with real aggregation, derived scores, and formulas in the JSON) will appear as the aggregation engine is implemented.
+`report krebs-status` (and energy-balance with body data) now surface real body adaptation validation when bodylog is available. See reporting.md and spec/04-krebs-status.md.
 
 ## 5. Generate Visuals (Planned)
 

@@ -52,6 +52,7 @@ krebslog report weekly --since "last monday" --until today
 krebslog report krebs-flux --period 14d --output ./reports/krebs-flux.png
 krebslog report redox-balance --since "last 7 days"   # antioxidant vs training load
 krebslog report energy-balance --include-body-trends  # see spec/03-bodylog.md
+krebslog report krebs-status --since "last 14 days"   # body-validated flux + adaptation (spec/04)
 krebslog report correlations --x nutrition --y training-load
 
 # Visual generation (first-class)
@@ -152,7 +153,8 @@ Same standards as nutlog:
 2. Basic daily/weekly text reports + simple charts
 3. Full Krebs cycle + antioxidant/redox image generation
 4. Telegram-ready formatting + agent context/tuning commands
-5. Optional bodylog integration + advanced correlations — implemented (see spec/03-bodylog.md); data pull, status, energy-balance --include-body-trends, web sources, and agent context enriched.
+5. Optional bodylog integration + advanced correlations — implemented (see spec/03-bodylog.md); data pull, status, energy-balance --include-body-trends + body_validation, web sources, and agent context enriched.
+6. Body-enhanced Krebs cycle status (`report krebs-status`) — **delivered** (see spec/04-krebs-status.md and reports/implementation-report-krebs-status.md); all phases (1-6) addressed: new command + body validation, agent enrichment, correlations with body metrics, image/telegram polish, cache awareness for derived fields, docs/tests/final verification.
 6. Polish, docs, packaging
 
 ---

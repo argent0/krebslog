@@ -77,7 +77,27 @@ krebslog --json report energy-balance --include-body-trends
 
 Intake (nutrition) vs. estimated expenditure (training + optional resting metabolism hints).
 
-`--include-body-trends` pulls weight/body-composition movement from bodylog (if the binary is present) and includes a rich `body` object in the JSON (stats + series for weight, body-fat, etc.). The weight delta serves as an observed outcome signal to help interpret the calculated energy balance. See spec/03-bodylog.md for the exact shapes and graceful degradation when bodylog is absent.
+`--include-body-trends` pulls weight/body-composition movement from bodylog (if the binary is present) and includes a rich `body` object in the JSON (stats + series for weight, body-fat, etc.). The weight delta serves as an observed outcome signal to help interpret the calculated energy balance. A `body_validation` block with qualitative label and discrepancy severity is also surfaced when body data is present. See spec/03-bodylog.md and spec/04-krebs-status.md.
+
+## Krebs Status (Body-Validated)
+
+```bash
+krebslog report krebs-status --since "last 14 days"
+krebslog --json report krebs-status --since "last 14 days" --include-raw
+krebslog report krebs-status --date today
+```
+
+The primary integrated surface (per spec/04-krebs-status.md). Combines:
+
+- Krebs flux proxy (0-10) with component breakdown (carb availability, fat mobilization, protein anaplerosis, training demand) and explicit formula.
+- Redox balance (ROS vs. antioxidant proxies) + interpretation.
+- Energy balance with `body_validation` (observed weight/muscle deltas turned into energy equivalents using 7700 kcal/kg fat / 5500 kcal/kg muscle, discrepancy severity, confidence).
+- `body_adaptation` (latest measurement + trends for weight/muscle/fat + implication for Krebs function).
+- Rule-based `insights[]` and a full `assumptions` + `caveats` block (measurement sparsity, short-term noise, normalization status).
+
+Everything degrades gracefully when bodylog is absent or the window is sparse — flux/redox/energy are still produced with clear notes. `--include-raw` embeds the child payloads for agents.
+
+Human output uses a compact table + narrative + bullets + explicit "Methodology & Caveats" section.
 
 ## Correlations
 
