@@ -117,6 +117,23 @@ krebslog report correlations --x nutrition --y training-load --period 30d
 
 Exploratory relationships between inputs and outputs.
 
+### report web
+
+```bash
+krebslog report web --period "last 30 days" --output ~/reports/krebslog/
+krebslog report web --since "last 7 days" --single-file --output ./krebs-today.html --theme dark
+```
+
+Generates a fully self-contained, mobile-first interactive HTML report (Tailwind via CDN, zero-build vanilla JS).
+
+- Hero element: clickable SVG Krebs cycle diagram with color + thickness encoding of your personal flux per step.
+- Bottom sheet on tap with per-step contribution, explanation, and calculation notes.
+- KPI cards, Inputs/Outputs/Redox sections, sortable metrics table, trends sparkline, full methodology + assumptions.
+- `--json` returns success metadata + paths (the HTML body is never printed under JSON).
+- Output: single-file `.html` (with embedded data + adjacent `.data.json`) by default, or `--folder` for `index.html` + `data.json`.
+- Works offline after generation (open directly or serve with `python -m http.server` / darkhttpd).
+- All derived values (flux proxy, redox, etc.) link back to transparent formulas in the page and in `data.json`.
+
 ## image
 
 Image commands are fully declared in the CLI (see [image-generation.md](image-generation.md) for vision and status).

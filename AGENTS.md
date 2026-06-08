@@ -77,6 +77,7 @@ When adding or modifying commands:
 |-------------------------------------------|--------------------------------------------------------------------------------------|
 | Add a new entity to `data pull`           | Extend the source/entity mapping in `commands/data.rs`; handle args for the child CLI; ensure `--json` passthrough or normalized output. |
 | Add a new report (daily/weekly/flux/...)  | Add variant to `ReportAction` in `cli.rs`; implement in `commands/report.rs`; surface formulas in JSON. |
+| Add `report web` interactive HTML        | New `Web` variant + full generator in `report.rs` (Tailwind CDN + vanilla JS + hand-crafted SVG cycle + bottom sheets). Single-file or folder output. See spec/02-web-report.md. |
 | Add or extend an image generator          | Add to `ImageAction`; implement behind the images feature flag when heavy deps (plotters) are involved; support `--output` and theme flags. |
 | Improve or extend date parsing            | Work in `utils.rs::parse_flexible_date`; add cases for new natural language forms; add tests; keep child-tool date formatting as `YYYY-MM-DD`. |
 | Add Telegram-ready output for a report    | Implement in `commands/telegram.rs`; produce MarkdownV2 + image path; keep a clean `--json` block for bots. |
@@ -108,6 +109,7 @@ cargo test
 cargo run -- --json data status --probe
 cargo run -- --json data pull --all --period "last 30 days"
 cargo run -- --json report daily --date today
+cargo run -- --json report web --period "last 30 days" --output ./reports/
 cargo run -- --json agent context --for hermes --since "last 30 days"
 ```
 

@@ -205,6 +205,42 @@ pub enum ReportAction {
         #[arg(long, default_value = "last 30 days")]
         period: String,
     },
+
+    /// Interactive self-contained HTML webpage report (mobile-first, explorable Krebs cycle).
+    Web {
+        /// Start of period (flexible: today, yesterday, last 7 days, 2026-05-20, last monday, ...).
+        #[arg(long, default_value = "last 30 days")]
+        since: String,
+        /// End of period (inclusive). Defaults to today.
+        #[arg(long)]
+        until: Option<String>,
+        /// Convenience alias for --since/--until (e.g. "last 30 days", "14d").
+        #[arg(long)]
+        period: Option<String>,
+
+        /// Output path: file (single-file HTML) or directory (folder mode with index.html + data.json).
+        #[arg(long, value_name = "PATH")]
+        output: Option<String>,
+
+        /// Force single-file HTML output (default when --output is a file or omitted).
+        #[arg(long)]
+        single_file: bool,
+        /// Force folder output (index.html + data.json + optional assets).
+        #[arg(long)]
+        folder: bool,
+
+        /// Copy or embed related images (e.g. krebs-cycle) into the report.
+        #[arg(long)]
+        include_images: bool,
+
+        /// Theme: dark (default), light, or auto.
+        #[arg(long, value_parser = ["dark", "light", "auto"], default_value = "dark")]
+        theme: String,
+
+        /// Embed the full data JSON inside the HTML (default true for single-file).
+        #[arg(long)]
+        embed_data: Option<bool>,
+    },
 }
 
 // ---------------- Image ----------------

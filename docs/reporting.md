@@ -88,6 +88,29 @@ krebslog --json report correlations --x carbs --y effective-reps
 
 Simple exploratory views showing relationships between nutrition inputs and training outputs over a window. Useful for agents looking for "what actually moves the needle for this user."
 
+## Web (Interactive HTML Report)
+
+```bash
+krebslog report web --period "last 30 days" --output ~/reports/krebslog/
+krebslog --json report web --since today --output ./my-krebs.html
+```
+
+Produces a rich, self-contained, explorable single-file (or small folder) HTML dashboard per [spec/02-web-report.md](../spec/02-web-report.md):
+
+- Dark theme, mobile-first, touch-friendly bottom sheets.
+- Interactive Krebs cycle SVG (8 core steps) with status-colored nodes and flux-weighted arrows.
+- KPI cards, inputs/outputs/redox, detailed step table, client-side trends, and complete methodology block.
+- Embedded `data.json` (or adjacent file) with the full structured payload (kpis, steps, raw child data, formulas).
+- Graceful when nutlog/repslog are missing or the window has little data — still renders a beautiful page with explanations.
+
+Serve example:
+```
+python -m http.server 8080 --directory ~/reports/krebslog/krebs-status-2026-06-07/
+# or just open the .html directly
+```
+
+This is the primary "deep dive" human + agent artifact. `--json` still gives the machine contract (paths + summary); the HTML is the deluxe view.
+
 ## Common Report Concepts (Future)
 
 When the full aggregation engine lands:

@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en" class="{{THEME_CLASS}}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>{{TITLE}}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root { color-scheme: dark; }
+    .light { color-scheme: light; }
+    .section-title { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; opacity: .7; }
+    .kpi-card { transition: transform .06s ease; }
+    .kpi-card:active { transform: scale(0.985); }
+    .node { cursor: pointer; transition: filter .08s ease; }
+    .node:hover { filter: brightness(1.15) saturate(1.1); }
+    .arrow { transition: stroke-width .08s ease; }
+    .status-good { color: #22c55e; }
+    .status-moderate { color: #eab308; }
+    .status-low { color: #ef4444; }
+    .tab { padding: 8px 14px; border-radius: 9999px; font-size: 13px; }
+    .tab.active { background: #27272a; color: #e4e4e7; }
+    .metric-row { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid rgba(63,63,70,.35); }
+    .krebs-svg { width: 100%; max-width: 520px; margin: 0 auto; display: block; }
+    .footer-note { font-size: 11px; opacity: .65; }
+    @media print {
+      .no-print { display: none !important; }
+      .krebs-svg { max-width: 460px; }
+    }
+  </style>
+</head>
+<body class="bg-zinc-950 text-zinc-200 antialiased">
+  <div class="max-w-[820px] mx-auto">
+    <div class="sticky top-0 z-40 bg-zinc-950/90 backdrop-blur border-b border-zinc-800 px-4 py-3 flex items-center justify-between">
+      <div>
+        <div class="font-semibold tracking-tight text-lg">Krebs Status</div>
+        <div class="text-xs text-zinc-400 -mt-0.5">{{PERIOD_LABEL}}</div>
+      </div>
+      <div class="flex items-center gap-2 text-xs">
+        <div class="px-2 py-1 rounded-full bg-zinc-900 border border-zinc-800">{{GENERATED}}</div>
+        <button onclick="toggleTheme()" class="px-3 py-1 rounded-full bg-zinc-900 border border-zinc-800 active:bg-zinc-800">Theme</button>
+      </div>
+    </div>
+
+    <div class="px-4 pt-4">
+      <div class="mb-3">
+        <div class="text-sm text-zinc-400">Overall metabolic picture from <span class="text-zinc-300">{{SOURCES}}</span></div>
+        <div id="overall-summary" class="mt-1 text-[15px] leading-snug">{{OVERALL}}</div>
+      </div>
+
+      <div class="flex flex-wrap gap-2 mb-4 no-print">
+        <div class="text-xs px-3 py-1 rounded-full border border-zinc-800 bg-zinc-900">{{PERIOD_LABEL}}</div>
+        <button onclick="location.reload()" class="text-xs px-3 py-1 rounded-full border border-zinc-800 hover:bg-zinc-900">Refresh data</button>
+      </div>
+
+      <div class="section-title mb-2">Overview</div>
+      <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-6">
+        {{KPI_CARDS}}
+      </div>
+
+      <div class="section-title mb-2">Krebs Cycle Explorer</div>
+      <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-3 mb-2">
+        <div class="flex items-center justify-between px-1 pb-2">
+          <div class="text-sm">Tap any step for your personal data</div>
+          <div class="flex gap-2 text-xs">
+            <button onclick="highlightBottlenecks()" class="px-2.5 py-1 rounded-full bg-zinc-800 border border-zinc-700 active:bg-zinc-700">Highlight bottlenecks</button>
+            <button onclick="resetCycleView()" class="px-2.5 py-1 rounded-full bg-zinc-800 border border-zinc-700 active:bg-zinc-700">Reset</button>
+          </div>
+        </div>
+        <div class="flex justify-center">
+          {{CYCLE_SVG}}
+        </div>
+        <div class="px-1 pt-2 text-[11px] text-zinc-400 flex flex-wrap gap-x-4 gap-y-1">
+          <div><span class="inline-block w-2 h-2 rounded-full bg-[#22c55e] align-middle"></span> Good / high flux</div>
+          <div><span class="inline-block w-2 h-2 rounded-full bg-[#eab308] align-middle"></span> Moderate</div>
+          <div><span class="inline-block w-2 h-2 rounded-full bg-[#ef4444] align-middle"></span> Bottleneck / low</div>
+        </div>
+      </div>
+
+      <div class="no-print sticky bottom-2 z-30 flex justify-center">
+        <div class="inline-flex bg-zinc-900/95 border border-zinc-700 rounded-2xl shadow p-1 text-sm">
+          <a href="#overview" class="tab" onclick="document.getElementById('overview').scrollIntoView({behavior:'smooth'})">Overview</a>
+          <a href="#cycle" class="tab" onclick="document.getElementById('cycle').scrollIntoView({behavior:'smooth'})">Cycle</a>
+          <a href="#metrics" class="tab" onclick="document.getElementById('metrics').scrollIntoView({behavior:'smooth'})">Metrics</a>
+          <a href="#trends" class="tab" onclick="document.getElementById('trends').scrollIntoView({behavior:'smooth'})">Trends</a>
+          <a href="#insights" class="tab" onclick="document.getElementById('insights').scrollIntoView({behavior:'smooth'})">Insights</a>
+        </div>
+      </div>
+
+      <div id="overview" class="mt-6">
+        <div class="section-title mb-2">Inputs (Acetyl-CoA sources)</div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-4 text-sm">
+          {{INPUTS}}
+        </div>
+      </div>
+
+      <div class="mt-6">
+        <div class="section-title mb-2">Outputs &amp; Energy Carriers</div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-4 text-sm">
+          {{OUTPUTS}}
+        </div>
+      </div>
+
+      <div class="mt-6">
+        <div class="section-title mb-2">Redox &amp; Antioxidant Status</div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-4 text-sm">
+          {{REDOX}}
+        </div>
+      </div>
+
+      <div id="metrics" class="mt-6">
+        <div class="section-title mb-2">Detailed Cycle Metrics</div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-2 text-sm overflow-x-auto">
+          {{STEPS_TABLE}}
+        </div>
+      </div>
+
+      <div id="trends" class="mt-6">
+        <div class="section-title mb-2">Trends</div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-4">
+          {{TRENDS}}
+        </div>
+      </div>
+
+      <div id="insights" class="mt-6">
+        <div class="section-title mb-2">Methodology &amp; Assumptions</div>
+        <div class="bg-zinc-900 border border-zinc-800 rounded-2xl p-4 text-sm">
+          {{METHODOLOGY}}
+        </div>
+        <div class="footer-note mt-3 px-1">
+          Generated by krebslog {{VERSION}} at {{GENERATED_UTC}}. All values are proxies derived from live nutlog + repslog data.
+          This page works completely offline. Data is embedded or lives in the adjacent data.json.
+        </div>
+      </div>
+    </div>
+    <div class="h-16"></div>
+  </div>
+
+  <!-- Bottom sheet -->
+  <div id="bottom-sheet" class="hidden fixed inset-x-0 bottom-0 z-50 bg-zinc-900/95 border-t border-zinc-700 rounded-t-2xl shadow-2xl max-h-[78vh] overflow-hidden">
+    <div class="flex items-center justify-between px-4 py-3 border-b border-zinc-700">
+      <div>
+        <div id="sheet-title" class="text-lg font-semibold"></div>
+        <div id="sheet-status" class="text-sm"></div>
+      </div>
+      <button onclick="closeSheet()" class="text-zinc-400 hover:text-zinc-200 text-2xl leading-none px-2">×</button>
+    </div>
+    <div class="p-4 overflow-auto max-h-[calc(78vh-56px)] text-sm" id="sheet-body"></div>
+    <div class="h-3"></div>
+  </div>
+  <div id="sheet-backdrop" onclick="closeSheet()" class="hidden fixed inset-0 z-40 bg-black/50"></div>
+
+  {{DATA_SCRIPT}}
+
+  <script>
+    try { tailwind.config = { theme: { extend: { fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] } } } }; } catch(e){}
+
+    function getData() {
+      const el = document.getElementById('krebs-data');
+      if (el) { try { return JSON.parse(el.textContent || '{}'); } catch(e){} }
+      return null;
+    }
+
+    let DATA = null;
+    window.addEventListener('load', function() {
+      DATA = getData();
+      if (DATA && DATA.krebs_cycle_steps) { attachCycleHandlers(DATA.krebs_cycle_steps); }
+    });
+
+    function attachCycleHandlers(steps) {
+      steps.forEach(function(step) {
+        var g = document.getElementById('node-' + step.id);
+        if (g) {
+          g.addEventListener('click', function(){ openSheetForStep(step); });
+        }
+        var arrows = document.querySelectorAll('path[data-step="' + step.id + '"], g[data-step="' + step.id + '"]');
+        arrows.forEach(function(a){ a.addEventListener('click', function(){ openSheetForStep(step); }); });
+      });
+    }
+
+    function openSheetForStep(step) {
+      var sheet = document.getElementById('bottom-sheet');
+      var back = document.getElementById('sheet-backdrop');
+      var title = document.getElementById('sheet-title');
+      var status = document.getElementById('sheet-status');
+      var body = document.getElementById('sheet-body');
+
+      title.textContent = step.name;
+      status.innerHTML = '<span class="status-' + step.status + ' font-medium">' + step.status.toUpperCase() + '</span> · flux proxy ' + step.flux_proxy + '%';
+
+      var html = '<div class="space-y-3">';
+      html += '<div><span class="text-zinc-400">Your estimated flux proxy:</span> <span class="font-semibold">' + step.flux_proxy + '%</span></div>';
+      if (step.personal_contribution) {
+        html += '<div><div class="text-zinc-400 text-xs mb-1">CONTRIBUTION BREAKDOWN</div><pre class="text-[12px] bg-black/40 p-2 rounded">' + JSON.stringify(step.personal_contribution, null, 2) + '</pre></div>';
+      }
+      html += '<div><div class="text-zinc-400 text-xs mb-1">WHY IT MATTERS</div>' + (step.explanation_short || '') + '</div>';
+      html += '<div><div class="text-zinc-400 text-xs mb-1">CALCULATION</div>' + (step.calculation_note || '') + '</div>';
+      html += '</div>';
+      body.innerHTML = html;
+      sheet.classList.remove('hidden');
+      back.classList.remove('hidden');
+    }
+
+    function closeSheet() {
+      document.getElementById('bottom-sheet').classList.add('hidden');
+      document.getElementById('sheet-backdrop').classList.add('hidden');
+    }
+
+    function highlightBottlenecks() {
+      var data = DATA;
+      if (!data || !data.krebs_cycle_steps) return;
+      data.krebs_cycle_steps.forEach(function(step) {
+        var g = document.getElementById('node-' + step.id);
+        if (!g) return;
+        if (step.status === 'low') {
+          g.style.filter = 'brightness(1.25) saturate(1.3)';
+          g.style.outline = '2px solid #ef4444';
+          g.style.outlineOffset = '2px';
+        } else {
+          g.style.filter = '';
+          g.style.outline = '';
+        }
+      });
+    }
+
+    function resetCycleView() {
+      document.querySelectorAll('[id^="node-"]').forEach(function(el){
+        el.style.filter = '';
+        el.style.outline = '';
+      });
+    }
+
+    function toggleTheme() {
+      var html = document.documentElement;
+      if (html.classList.contains('light')) { html.classList.remove('light'); html.classList.add('dark'); }
+      else if (html.classList.contains('dark')) { html.classList.remove('dark'); html.classList.add('light'); }
+      else { html.classList.toggle('dark'); }
+    }
+
+    document.addEventListener('keydown', function(e){
+      if (e.key === 'Escape') {
+        var s = document.getElementById('bottom-sheet');
+        if (s && !s.classList.contains('hidden')) closeSheet();
+      }
+    });
+  </script>
+</body>
+</html>
