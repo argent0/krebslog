@@ -16,7 +16,7 @@ krebslog
 ├── Calls (subprocess + --json)
 │   ├── nutlog (nutrition, consumption, products, reports)
 │   └── repslog (workouts, sets, stats, exercises)
-│   └── (future: bodylog measurements)
+│   └── bodylog (measurements, body composition trends) — see spec/03-bodylog.md
 ├── Internal (optional local SQLite cache for speed — fully disableable)
 ├── Processing (daily/period aggregates, flux proxies, redox balance, correlations)
 ├── Output
@@ -51,7 +51,7 @@ krebslog report daily --date today --include-image
 krebslog report weekly --since "last monday" --until today
 krebslog report krebs-flux --period 14d --output ./reports/krebs-flux.png
 krebslog report redox-balance --since "last 7 days"   # antioxidant vs training load
-krebslog report energy-balance --include-body-trends  # when bodylog added
+krebslog report energy-balance --include-body-trends  # see spec/03-bodylog.md
 krebslog report correlations --x nutrition --y training-load
 
 # Visual generation (first-class)
@@ -152,7 +152,7 @@ Same standards as nutlog:
 2. Basic daily/weekly text reports + simple charts
 3. Full Krebs cycle + antioxidant/redox image generation
 4. Telegram-ready formatting + agent context/tuning commands
-5. Optional bodylog integration + advanced correlations
+5. Optional bodylog integration + advanced correlations — detailed plan in spec/03-bodylog.md
 6. Polish, docs, packaging
 
 ---

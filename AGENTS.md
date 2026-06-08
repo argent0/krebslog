@@ -4,7 +4,7 @@ This document helps AI agents (and humans working with them) collaborate effecti
 
 ## Project Philosophy
 
-`krebslog` is a **single-user, local-first, LLM-agent-first** CLI tool that turns data from `nutlog` + `repslog` (and optionally `bodylog` in the future) into rich metabolic reports centered on the Krebs (TCA) cycle, energy flux, training load, nutrition inputs, antioxidant/redox balance, and body adaptation outcomes.
+`krebslog` is a **single-user, local-first, LLM-agent-first** CLI tool that turns data from `nutlog` + `repslog` + `bodylog` (optional but fully supported — see spec/03-bodylog.md) into rich metabolic reports centered on the Krebs (TCA) cycle, energy flux, training load, nutrition inputs, antioxidant/redox balance, and body adaptation outcomes.
 
 Key principles:
 - **Simplicity first** — Prefer boring, maintainable solutions over clever abstractions.
@@ -24,7 +24,7 @@ Key principles:
   - `src/commands/data.rs` + `src/utils.rs` — the critical "call child CLIs with --json, parse, forward" logic and the flexible date parser.
   - `src/error.rs` — the domain error types and how they become the consistent `{"success": false, "error": "..."}` shape.
   - `src/commands/report.rs`, `src/commands/image.rs`, etc. — how higher-level groups are implemented.
-- Study the real `nutlog` and `repslog` CLIs (their `--help` and `--json` output shapes) because krebslog is a consumer of them.
+- Study the real `nutlog`, `repslog`, and `bodylog` CLIs (their `--help` and `--json` output shapes) because krebslog is a consumer of them. See spec/03-bodylog.md for the bodylog contract.
 
 ### 2. Making Changes
 - Follow the command pattern: `krebslog <group> <action> [flags]`
@@ -54,7 +54,7 @@ When adding or modifying commands:
 ### 5. Database & Schema Changes
 - krebslog's optional local cache (at `~/.local/share/krebslog/krebslog.db` or user `--db`) is the *only* database it owns.
 - When the cache gains schema (daily aggregates, pull timestamps, config, etc.), use versioned migration files (similar to repslog's `migrations/`) and simple rusqlite patterns (matching nutlog's style).
-- **Never** open or query the SQLite files belonging to nutlog, repslog, or bodylog. All freshness comes from live CLI subprocess calls (or previously cached results of those calls).
+- **Never** open or query the SQLite files belonging to nutlog, repslog, or bodylog. All freshness comes from live CLI subprocess calls (or previously cached results of those calls). Bodylog integration is specified in spec/03-bodylog.md.
 - Timestamps are stored in UTC.
 - The cache must remain completely optional and disableable (`--no-cache`).
 
@@ -75,7 +75,7 @@ When adding or modifying commands:
 
 | Task                                      | Recommended Approach                                                                 |
 |-------------------------------------------|--------------------------------------------------------------------------------------|
-| Add a new entity to `data pull`           | Extend the source/entity mapping in `commands/data.rs`; handle args for the child CLI; ensure `--json` passthrough or normalized output. |
+| Add a new entity to `data pull`           | Extend the source/entity mapping in `commands/data.rs`; handle args for the child CLI (includes bodylog since spec/03-bodylog.md); ensure `--json` passthrough or normalized output. |
 | Add a new report (daily/weekly/flux/...)  | Add variant to `ReportAction` in `cli.rs`; implement in `commands/report.rs`; surface formulas in JSON. |
 | Add `report web` interactive HTML        | New `Web` variant + full generator in `report.rs` (Tailwind CDN + vanilla JS + hand-crafted SVG cycle + bottom sheets). Single-file or folder output. See spec/02-web-report.md. |
 | Add or extend an image generator          | Add to `ImageAction`; implement behind the images feature flag when heavy deps (plotters) are involved; support `--output` and theme flags. |
