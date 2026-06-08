@@ -31,13 +31,17 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "PATH", env = "REPSLOG_BIN")]
     pub repslog_bin: Option<String>,
 
+    /// Path to the bodylog binary (default: search PATH + common locations).
+    #[arg(long, global = true, value_name = "PATH", env = "BODYLOG_BIN")]
+    pub bodylog_bin: Option<String>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// Pull data from source tools (nutlog, repslog) and optionally cache it.
+    /// Pull data from source tools (nutlog, repslog, bodylog) and optionally cache it.
     Data {
         #[command(subcommand)]
         action: DataAction,
@@ -99,8 +103,8 @@ pub enum Commands {
 pub enum DataAction {
     /// Pull / refresh data from a source tool via its --json interface.
     Pull {
-        /// Source tool: nutlog or repslog
-        #[arg(long, value_parser = ["nutlog", "repslog"])]
+        /// Source tool: nutlog, repslog, or bodylog
+        #[arg(long, value_parser = ["nutlog", "repslog", "bodylog"])]
         source: Option<String>,
 
         /// Entity to pull (e.g. consumption, purchase, workout, set, stats).

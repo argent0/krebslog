@@ -16,6 +16,7 @@ All commands accept the global flags listed below.
 | `--no-cache`      | Disable the local cache; always call nutlog/repslog live                    | Use when you need guaranteed fresh data          |
 | `--nutlog-bin`    | Path to the nutlog binary (overrides PATH + fallbacks)                      | Or set `NUTLOG_BIN` env var                      |
 | `--repslog-bin`   | Path to the repslog binary                                                  | Or set `REPSLOG_BIN` env var                     |
+| `--bodylog-bin`   | Path to the bodylog binary (overrides PATH + fallbacks)                     | Or set `BODYLOG_BIN` env var                     |
 | `--help` / `-h`   | Show help for the command or subcommand                                     | -                                                |
 | `--version` / `-V`| Show version                                                                | -                                                |
 
@@ -42,7 +43,7 @@ krebslog data pull --source repslog --entity workout --since "last 14 days"
 krebslog data pull --all --period 90d [--dry-run]
 ```
 
-- `--source` — `nutlog` or `repslog`
+- `--source` — `nutlog`, `repslog`, or `bodylog`
 - `--entity` — what to pull from that source (e.g. `consumption`, `workout`, `stats:summary`, `report:nutrition`). When omitted with a single `--source`, a sensible default for that tool is used.
 - `--all` — pull a curated default set from both tools (most common form for agents).
 - `--period` — convenience window (works with `--all`).
@@ -107,7 +108,7 @@ Training oxidative load vs. dietary antioxidant support.
 krebslog report energy-balance --since "last 14 days" [--include-body-trends]
 ```
 
-Intake vs. expenditure, with optional body composition overlays (future bodylog integration).
+Intake vs. expenditure. With `--include-body-trends`, krebslog pulls weight / body comp from bodylog (if available) and includes structured `body` stats (start/end/delta/trend/series) in the JSON output. See spec/03-bodylog.md.
 
 ### report correlations
 

@@ -142,6 +142,7 @@ Parse stdout as JSON. Capture image paths from report/telegram/image commands wh
 
 - `NUTLOG_BIN` / `--nutlog-bin`
 - `REPSLOG_BIN` / `--repslog-bin`
+- `BODYLOG_BIN` / `--bodylog-bin`
 
 Useful when the tools are installed in non-standard locations or you want to test against a development build of nutlog/repslog.
 

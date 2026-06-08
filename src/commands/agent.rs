@@ -1,6 +1,7 @@
 use crate::cli::{AgentAction, AgentSkillsAction};
 use crate::context::Context;
 use crate::error::Result;
+use crate::utils::{resolve_bin, run_external_json};
 
 pub fn handle_agent(action: AgentAction, ctx: &Context) -> Result<()> {
     let json = ctx.json;
@@ -11,20 +12,61 @@ pub fn handle_agent(action: AgentAction, ctx: &Context) -> Result<()> {
             since,
             output,
         } => {
+            let bodylog_bin = resolve_bin(ctx.bodylog_bin.as_deref(), &["bodylog"]);
+            let body_available = bodylog_bin.is_some();
+            let mut body_latest: Option<serde_json::Value> = None;
+
+            if body_available {
+                if let Some(bin) = &bodylog_bin {
+                    // Best-effort latest measurement or weight summary for the agent bundle
+                    if let Ok((out, _)) = run_external_json(
+                        bin,
+                        &[
+                            "measurement".into(),
+                            "list".into(),
+                            "--since".into(),
+                            "today".into(),
+                        ],
+                    ) {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+                            if let Some(arr) = v.as_array() {
+                                if let Some(first) = arr.first() {
+                                    body_latest = Some(first.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if json {
+                let mut payload = serde_json::json!({
+                    "success": true,
+                    "command": "agent context",
+                    "for": r#for,
+                    "since": since,
+                    "output": output,
+                    "bodylog_available": body_available,
+                });
+                if let Some(b) = body_latest {
+                    payload["body"] = serde_json::json!({ "latest": b });
+                } else if body_available {
+                    payload["body"] = serde_json::json!({ "available": true, "note": "no recent measurement for 'today'" });
+                }
+                if body_available {
+                    payload["note"] = serde_json::json!(
+                        "skeleton — nutrition + training + redox + body (when present) bundle"
+                    );
+                }
                 println!(
                     "{}",
-                    serde_json::json!({
-                        "success": true,
-                        "command": "agent context",
-                        "for": r#for,
-                        "since": since,
-                        "output": output,
-                        "note": "skeleton — will emit nutrition + training + redox + insights bundle"
-                    })
+                    serde_json::to_string_pretty(&payload).expect("in-memory")
                 );
             } else if !quiet {
-                println!("agent context --for {} --since {} (skeleton)", r#for, since);
+                println!(
+                    "agent context --for {} --since {} (skeleton, bodylog_available={})",
+                    r#for, since, body_available
+                );
             }
         }
         AgentAction::Tune {

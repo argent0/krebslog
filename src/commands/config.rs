@@ -36,6 +36,7 @@ pub fn handle_config(action: ConfigAction, ctx: &Context) -> Result<()> {
                 println!("Effective config (skeleton defaults):");
                 println!("  nutlog.bin = (auto)");
                 println!("  repslog.bin = (auto)");
+                println!("  bodylog.bin = (auto)");
                 println!("  reports.dir = ~/reports/krebslog");
             }
         }

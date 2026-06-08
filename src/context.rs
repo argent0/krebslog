@@ -11,6 +11,7 @@ pub struct Context {
     pub db: Option<String>,
     pub nutlog_bin: Option<String>,
     pub repslog_bin: Option<String>,
+    pub bodylog_bin: Option<String>,
 }
 
 impl Context {
@@ -23,6 +24,7 @@ impl Context {
             db: cli.db.clone(),
             nutlog_bin: cli.nutlog_bin.clone(),
             repslog_bin: cli.repslog_bin.clone(),
+            bodylog_bin: cli.bodylog_bin.clone(),
         }
     }
 }

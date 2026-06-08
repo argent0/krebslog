@@ -4,7 +4,7 @@ The `data` command group is the ingestion layer of krebslog. It is the **only** 
 
 ## Philosophy
 
-- krebslog never opens nutlog.db or repslog.db directly.
+- krebslog never opens nutlog.db, repslog.db, or bodylog.db directly.
 - All data freshness ultimately comes from executing the sibling CLIs with `--json`.
 - The optional local cache exists only for speed and offline convenience; it can be bypassed at any time with `--no-cache`.
 
@@ -21,6 +21,10 @@ krebslog data pull --source nutlog --entity consumption --since "last 30 days"
 # Pull from repslog
 krebslog data pull --source repslog --entity workout --since "2026-05-01"
 
+# Pull from bodylog (weight / body comp)
+krebslog data pull --source bodylog --entity measurement --since "last 14 days"
+krebslog data pull --source bodylog --entity report:summary --since "last 7 days"
+
 # The convenient "I want everything recent" form
 krebslog data pull --all --period 90d
 krebslog --json data pull --all --period "last 14 days"
@@ -29,6 +33,7 @@ krebslog --json data pull --all --period "last 14 days"
 `--all` currently pulls a curated default set:
 - From nutlog: `consumption` list + `report nutrition`
 - From repslog: `workout` list + `stats summary` (and volume when useful)
+- From bodylog: `measurement` list + `report summary` (weight/body comp trends)
 
 ### Flexible Windows
 

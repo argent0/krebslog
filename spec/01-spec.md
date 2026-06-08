@@ -152,7 +152,7 @@ Same standards as nutlog:
 2. Basic daily/weekly text reports + simple charts
 3. Full Krebs cycle + antioxidant/redox image generation
 4. Telegram-ready formatting + agent context/tuning commands
-5. Optional bodylog integration + advanced correlations — detailed plan in spec/03-bodylog.md
+5. Optional bodylog integration + advanced correlations — implemented (see spec/03-bodylog.md); data pull, status, energy-balance --include-body-trends, web sources, and agent context enriched.
 6. Polish, docs, packaging
 
 ---

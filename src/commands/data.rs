@@ -28,9 +28,11 @@ fn handle_status(probe: bool, ctx: &Context) -> Result<()> {
     let quiet = ctx.quiet;
     let nutlog_override = ctx.nutlog_bin.as_deref();
     let repslog_override = ctx.repslog_bin.as_deref();
+    let bodylog_override = ctx.bodylog_bin.as_deref();
 
     let nutlog_bin = resolve_bin(nutlog_override, &["nutlog"]);
     let repslog_bin = resolve_bin(repslog_override, &["repslog"]);
+    let bodylog_bin = resolve_bin(bodylog_override, &["bodylog"]);
 
     let mut sources: Vec<Value> = vec![];
 
@@ -110,6 +112,36 @@ fn handle_status(probe: bool, ctx: &Context) -> Result<()> {
     };
     sources.push(rep);
 
+    // bodylog
+    let body = if let Some(b) = &bodylog_bin {
+        let mut info = serde_json::json!({
+            "source": "bodylog",
+            "bin": b,
+            "available": true,
+            "last_pull": null,
+            "entities": ["measurement", "report:summary", "report:weight", "config"]
+        });
+        if probe {
+            // Lightweight probe: config is always fast and requires no dates
+            match run_external_json(b, &["config".into(), "show".into()]) {
+                Ok((out, _)) => {
+                    info["probe"] = serde_json::json!({ "ok": true, "sample": out.lines().next().unwrap_or("").chars().take(80).collect::<String>() });
+                }
+                Err(e) => {
+                    info["probe"] = serde_json::json!({ "ok": false, "error": e.to_string() });
+                }
+            }
+        }
+        info
+    } else {
+        serde_json::json!({
+            "source": "bodylog",
+            "available": false,
+            "error": "binary not found"
+        })
+    };
+    sources.push(body);
+
     if json {
         println!(
             "{}",
@@ -167,6 +199,7 @@ fn handle_pull(
     let quiet = ctx.quiet;
     let nutlog_override = ctx.nutlog_bin.as_deref();
     let repslog_override = ctx.repslog_bin.as_deref();
+    let bodylog_override = ctx.bodylog_bin.as_deref();
 
     // Resolve effective since/until
     let (since_eff, until_eff) = resolve_period(&since, until.as_deref(), period.as_deref())?;
@@ -175,10 +208,10 @@ fn handle_pull(
     let until_str = until_eff.map(format_date_for_child);
 
     if all || source.is_none() {
-        // Pull a curated set from both tools
+        // Pull a curated set from all known tools
         if !quiet && !json {
             println!(
-                "Pulling from nutlog + repslog for {}..{}",
+                "Pulling from nutlog + repslog + bodylog for {}..{}",
                 since_str,
                 until_str.as_deref().unwrap_or("now")
             );
@@ -198,6 +231,14 @@ fn handle_pull(
             json,
             quiet,
             repslog_override,
+        )?;
+        pull_bodylog_default(
+            &since_str,
+            until_str.as_deref(),
+            dry_run,
+            json,
+            quiet,
+            bodylog_override,
         )?;
         if json {
             // Already emitted per-source success objects or arrays; emit a top level ack if nothing was printed.
@@ -233,6 +274,18 @@ fn handle_pull(
                 json,
                 quiet,
                 repslog_override,
+            )
+        }
+        "bodylog" => {
+            let ent = entity.as_deref().unwrap_or("measurement");
+            pull_bodylog_entity(
+                ent,
+                &since_str,
+                until_str.as_deref(),
+                dry_run,
+                json,
+                quiet,
+                bodylog_override,
             )
         }
         other => Err(KrebslogError::UnknownSource(other.to_string())),
@@ -533,6 +586,206 @@ fn pull_repslog_entity(
             println!(
                 "{}",
                 serde_json::json!({ "success": true, "source": "repslog", "entity": display_entity, "rows": 0 })
+            );
+        } else if !quiet {
+            println!("(no data)");
+        }
+    } else {
+        println!("{}", stdout.trim_end());
+    }
+
+    Ok(())
+}
+
+// ---------------- bodylog support ----------------
+
+fn pull_bodylog_default(
+    since: &str,
+    until: Option<&str>,
+    dry_run: bool,
+    json: bool,
+    quiet: bool,
+    override_bin: Option<&str>,
+) -> Result<()> {
+    // Default entities for bodylog in a metabolic context:
+    // - measurement list (raw daily measurements)
+    // - report summary (convenient aggregates + trends for the window)
+    pull_bodylog_entity(
+        "measurement",
+        since,
+        until,
+        dry_run,
+        json,
+        quiet,
+        override_bin,
+    )?;
+    pull_bodylog_entity(
+        "report:summary",
+        since,
+        until,
+        dry_run,
+        json,
+        quiet,
+        override_bin,
+    )?;
+    Ok(())
+}
+
+fn pull_bodylog_entity(
+    entity: &str,
+    since: &str,
+    until: Option<&str>,
+    dry_run: bool,
+    json: bool,
+    quiet: bool,
+    override_bin: Option<&str>,
+) -> Result<()> {
+    let bin =
+        resolve_bin(override_bin, &["bodylog"]).ok_or_else(|| KrebslogError::ExternalTool {
+            bin: "bodylog".into(),
+            reason: "not found in PATH or common locations".into(),
+        })?;
+
+    if dry_run {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "success": true,
+                    "dry_run": true,
+                    "source": "bodylog",
+                    "entity": entity,
+                    "since": since,
+                    "until": until
+                })
+            );
+        } else if !quiet {
+            println!("(dry-run) would call: {} --json ... for {}", bin, entity);
+        }
+        return Ok(());
+    }
+
+    let mut args: Vec<String> = vec![];
+    let mut display_entity = entity.to_string();
+
+    match entity {
+        "measurement" | "measurements" => {
+            args.push("measurement".into());
+            args.push("list".into());
+            args.push("--since".into());
+            args.push(since.into());
+            if let Some(u) = until {
+                args.push("--until".into());
+                args.push(u.into());
+            }
+        }
+        "report:summary" | "summary" => {
+            display_entity = "report summary".to_string();
+            args.push("report".into());
+            args.push("summary".into());
+            args.push("--since".into());
+            args.push(since.into());
+            if let Some(u) = until {
+                args.push("--until".into());
+                args.push(u.into());
+            }
+        }
+        "report:weight" | "weight" => {
+            display_entity = "report weight".to_string();
+            args.push("report".into());
+            args.push("weight".into());
+            args.push("--since".into());
+            args.push(since.into());
+            if let Some(u) = until {
+                args.push("--until".into());
+                args.push(u.into());
+            }
+        }
+        "report:body-fat" | "body-fat" | "body_fat" => {
+            display_entity = "report body-fat".to_string();
+            args.push("report".into());
+            args.push("body-fat".into());
+            args.push("--since".into());
+            args.push(since.into());
+            if let Some(u) = until {
+                args.push("--until".into());
+                args.push(u.into());
+            }
+        }
+        "report:muscle" | "muscle" | "skeletal-muscle" => {
+            display_entity = "report muscle".to_string();
+            args.push("report".into());
+            args.push("muscle".into());
+            args.push("--since".into());
+            args.push(since.into());
+            if let Some(u) = until {
+                args.push("--until".into());
+                args.push(u.into());
+            }
+        }
+        "report:visceral-fat" | "visceral-fat" | "visceral_fat" => {
+            display_entity = "report visceral-fat".to_string();
+            args.push("report".into());
+            args.push("visceral-fat".into());
+            args.push("--since".into());
+            args.push(since.into());
+            if let Some(u) = until {
+                args.push("--until".into());
+                args.push(u.into());
+            }
+        }
+        "report:bmi" | "bmi" => {
+            display_entity = "report bmi".to_string();
+            args.push("report".into());
+            args.push("bmi".into());
+            args.push("--since".into());
+            args.push(since.into());
+            if let Some(u) = until {
+                args.push("--until".into());
+                args.push(u.into());
+            }
+        }
+        "report:resting-metabolism" | "resting-metabolism" | "resting_metabolism" => {
+            display_entity = "report resting-metabolism".to_string();
+            args.push("report".into());
+            args.push("resting-metabolism".into());
+            args.push("--since".into());
+            args.push(since.into());
+            if let Some(u) = until {
+                args.push("--until".into());
+                args.push(u.into());
+            }
+        }
+        "config" | "profile" => {
+            display_entity = "config".to_string();
+            args.push("config".into());
+            args.push("show".into());
+            // config show takes no date args
+        }
+        other => {
+            return Err(KrebslogError::UnknownEntity {
+                src: "bodylog".into(),
+                entity: other.to_string(),
+            });
+        }
+    }
+
+    if !quiet && !json {
+        println!(
+            "Pulling {} from bodylog ({}..{})",
+            display_entity,
+            since,
+            until.unwrap_or("recent")
+        );
+    }
+
+    let (stdout, _stderr) = run_external_json(&bin, &args)?;
+
+    if stdout.trim().is_empty() {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({ "success": true, "source": "bodylog", "entity": display_entity, "rows": 0 })
             );
         } else if !quiet {
             println!("(no data)");

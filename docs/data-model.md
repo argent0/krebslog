@@ -11,6 +11,7 @@ This document describes the internal aggregates krebslog maintains, date handlin
   - `nutlog --json report nutrition ...`
   - `repslog --json workout list ...`
   - `repslog --json stats summary ...` / `stats volume ...`
+  - `bodylog --json measurement list ...` / `report weight ...` / `report summary ...` / `config show` (when `--include-body-trends` or explicit body pulls)
 - krebslog's job is **aggregation + derivation + presentation**:
   - Daily grain summaries
   - Krebs (TCA) cycle flux proxies
@@ -30,6 +31,12 @@ When the aggregation engine is complete, krebslog will maintain (in its optional
 - `protein_g`, `carbs_g`, `fat_g`
 - `estimated_acetyl_coa_precursors` (derived from carb + fat + protein intake)
 - `antioxidant_score` (custom or derived from tags/nutrients in products)
+
+### Body Inputs (sourced from bodylog, optional)
+
+- `weight_kg`, `body_fat_pct`, `skeletal_muscle_pct`, `visceral_fat_level`, `bmi`
+- Profile (height_cm, date_of_birth) for BMR context when needed
+- Used primarily for outcome signals (weight delta) on energy balance and adaptation trends. Stored sparsely in future cache.
 
 ### Training Inputs (sourced from repslog)
 

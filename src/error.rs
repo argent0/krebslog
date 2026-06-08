@@ -8,7 +8,7 @@ pub enum KrebslogError {
     #[error("unrecognized date format: '{0}'. Use today, yesterday, 2026-05-20, last 7 days, last monday, etc.")]
     InvalidDate(String),
 
-    #[error("unknown source: '{0}'. Supported: nutlog, repslog")]
+    #[error("unknown source: '{0}'. Supported: nutlog, repslog, bodylog")]
     UnknownSource(String),
 
     #[error("unknown entity for source {src}: '{entity}'")]

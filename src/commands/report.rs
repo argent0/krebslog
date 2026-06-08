@@ -76,13 +76,107 @@ pub fn handle_report(action: ReportAction, ctx: &Context) -> Result<()> {
             until: _,
             include_body_trends,
         } => {
+            // For bodylog calls we pass the flexible `since` directly (bodylog accepts
+            // today / last monday / YYYY-MM-DD etc.). Full until handling can be added
+            // when the full energy balance report is implemented.
+            let mut body: Option<serde_json::Value> = None;
+            let mut body_notes = None;
+
+            if include_body_trends {
+                let bodylog_bin = resolve_bin(ctx.bodylog_bin.as_deref(), &["bodylog"]);
+                if let Some(bin) = &bodylog_bin {
+                    // Prefer report weight (gives stats + series); fallback to summary
+                    let call_args: Vec<String> = vec![
+                        "report".into(),
+                        "weight".into(),
+                        "--since".into(),
+                        since.clone(),
+                    ];
+                    match run_external_json(bin, &call_args) {
+                        Ok((out, _)) => {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+                                body = Some(v);
+                            }
+                        }
+                        Err(e) => {
+                            body_notes = Some(format!("bodylog fetch failed: {}", e));
+                        }
+                    }
+                    if body.is_none() {
+                        let call_args: Vec<String> = vec![
+                            "report".into(),
+                            "summary".into(),
+                            "--since".into(),
+                            since.clone(),
+                        ];
+                        if let Ok((out, _)) = run_external_json(bin, &call_args) {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+                                body = Some(serde_json::json!({ "summary": v }));
+                            }
+                        }
+                    }
+                } else {
+                    body_notes = Some("bodylog binary not found".to_string());
+                }
+            }
+
             if json {
+                let mut out = serde_json::json!({
+                    "success": true,
+                    "command": "report energy-balance",
+                    "since": since,
+                    "include_body_trends": include_body_trends,
+                });
+                if let Some(b) = body {
+                    out["body"] = b;
+                }
+                if let Some(n) = body_notes {
+                    out["body_note"] = serde_json::json!(n);
+                }
+                if !include_body_trends {
+                    out["note"] = serde_json::json!("skeleton (nutrition + training aggregation not yet wired; body trends delivered when --include-body-trends)");
+                }
                 println!(
                     "{}",
-                    serde_json::json!({ "success": true, "command": "report energy-balance", "since": since, "include_body_trends": include_body_trends, "note": "skeleton" })
+                    serde_json::to_string_pretty(&out).expect("in-memory json")
                 );
             } else if !quiet {
-                println!("report energy-balance (skeleton)");
+                println!(
+                    "report energy-balance --since {} (include_body_trends={})",
+                    since, include_body_trends
+                );
+                if let Some(b) = &body {
+                    println!("body trends from bodylog:");
+                    if let Some(stats) = b
+                        .get("stats")
+                        .or_else(|| b.get("weight").and_then(|w| w.get("stats")))
+                    {
+                        let start_v = stats.get("start").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                        let end_v = stats.get("end").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                        let delta = stats.get("change").and_then(|x| x.as_f64()).unwrap_or(0.0);
+                        let trend = stats.get("trend").and_then(|x| x.as_str()).unwrap_or("?");
+                        println!(
+                            "  weight: {:.1} → {:.1} (Δ {:.1} kg, trend: {})",
+                            start_v, end_v, delta, trend
+                        );
+                    } else if let Some(w) = b.get("weight") {
+                        println!(
+                            "  weight summary: {}",
+                            serde_json::to_string(w).unwrap_or_default()
+                        );
+                    } else {
+                        println!(
+                            "  body data: {}",
+                            serde_json::to_string_pretty(b).unwrap_or_default()
+                        );
+                    }
+                } else if include_body_trends {
+                    if let Some(n) = body_notes {
+                        println!("  (bodylog: {})", n);
+                    } else {
+                        println!("  (no body data or bodylog unavailable)");
+                    }
+                }
             }
         }
         ReportAction::Correlations { x, y, period } => {
@@ -329,10 +423,13 @@ fn build_period_label(raw_since: &str, start: &str, end: &str) -> String {
 struct GatheredData {
     nutlog_available: bool,
     repslog_available: bool,
+    bodylog_available: bool,
     consumption: Option<serde_json::Value>,
     nutrition_report: Option<serde_json::Value>,
     workouts: Option<serde_json::Value>,
     stats_summary: Option<serde_json::Value>,
+    body_measurements: Option<serde_json::Value>,
+    body_summary: Option<serde_json::Value>,
     error_notes: Vec<String>,
 }
 
@@ -341,9 +438,11 @@ fn gather_web_data(start: &str, end: &str, ctx: &Context) -> GatheredData {
 
     let nutlog_bin = resolve_bin(ctx.nutlog_bin.as_deref(), &["nutlog"]);
     let repslog_bin = resolve_bin(ctx.repslog_bin.as_deref(), &["repslog"]);
+    let bodylog_bin = resolve_bin(ctx.bodylog_bin.as_deref(), &["bodylog"]);
 
     g.nutlog_available = nutlog_bin.is_some();
     g.repslog_available = repslog_bin.is_some();
+    g.bodylog_available = bodylog_bin.is_some();
 
     if let Some(bin) = &nutlog_bin {
         // consumption list
@@ -417,6 +516,41 @@ fn gather_web_data(start: &str, end: &str, ctx: &Context) -> GatheredData {
         }
     }
 
+    if let Some(bin) = &bodylog_bin {
+        // Fetch a compact body view for the web report (weight trends + summary)
+        if let Ok((out, _)) = run_external_json(
+            bin,
+            &[
+                "report".into(),
+                "weight".into(),
+                "--since".into(),
+                start.into(),
+                "--until".into(),
+                end.into(),
+            ],
+        ) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+                g.body_measurements = Some(v.clone());
+                g.body_summary = Some(v);
+            }
+        } else if let Ok((out, _)) = run_external_json(
+            bin,
+            &[
+                "report".into(),
+                "summary".into(),
+                "--since".into(),
+                start.into(),
+            ],
+        ) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+                g.body_summary = Some(v);
+            }
+        } else {
+            g.error_notes
+                .push("Failed to fetch body data from bodylog".into());
+        }
+    }
+
     g
 }
 
@@ -443,6 +577,9 @@ fn build_web_report_data(start: &str, end: &str, label: &str, g: GatheredData) -
         }
         if g.repslog_available {
             s.push("repslog".to_string());
+        }
+        if g.bodylog_available {
+            s.push("bodylog".to_string());
         }
         if s.is_empty() {
             s.push("none (no source tools found)".to_string());

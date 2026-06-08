@@ -75,9 +75,9 @@ krebslog report energy-balance --since "last 14 days"
 krebslog --json report energy-balance --include-body-trends
 ```
 
-Intake (nutrition) vs. estimated expenditure (training + BMR hints from future bodylog integration).
+Intake (nutrition) vs. estimated expenditure (training + optional resting metabolism hints).
 
-`--include-body-trends` will pull weight / body comp movement from bodylog (when available) and overlay it on the energy picture.
+`--include-body-trends` pulls weight/body-composition movement from bodylog (if the binary is present) and includes a rich `body` object in the JSON (stats + series for weight, body-fat, etc.). The weight delta serves as an observed outcome signal to help interpret the calculated energy balance. See spec/03-bodylog.md for the exact shapes and graceful degradation when bodylog is absent.
 
 ## Correlations
 
