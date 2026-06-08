@@ -49,6 +49,13 @@ krebslog --json data status --probe
 krebslog --json data pull --source nutlog --entity consumption --since "last 14 days"
 krebslog --json data pull --source repslog --entity workout --since "last 14 days"
 krebslog --json data pull --source repslog --entity "stats:summary" --since "last 14 days"
+
+# Body composition (optional third source — see spec/03-bodylog.md)
+krebslog --json data status --probe
+krebslog --json data pull --source bodylog --entity measurement --since "last 14 days"
+krebslog --json data pull --source bodylog --entity report:summary --since "last 7 days"
+# Or the convenient form (now includes bodylog)
+krebslog --json data pull --all --period "last 30 days"
 ```
 
 ## Daily / Periodic Metabolic Snapshot
@@ -58,11 +65,32 @@ krebslog --json report daily --date today --include-image
 krebslog --json report krebs-flux --period 14d
 krebslog --json report redox-balance --since "last 7 days"
 krebslog --json report energy-balance --since "last 14 days"
+krebslog --json report energy-balance --since "last 14 days" --include-body-trends  # weight/body as outcome signal
 krebslog --json report krebs-status --since "last 14 days"   # body-validated flux + adaptation (recommended)
 krebslog --json report correlations --x nutrition --y training-load --period 30d
 ```
 
 Under `--json` these will (when fully implemented) include the raw series, the computed stats, and the exact formulas/assumptions that were used for any derived scores. `report krebs-status` is the richest single call for agents that need flux + body outcome validation in one payload.
+
+### Bodylog (body composition as outcome context)
+
+```bash
+# Explicit body pulls (passthrough of real bodylog --json shapes)
+krebslog --json data pull --source bodylog --entity measurement --since "last 14 days"
+krebslog --json data pull --source bodylog --entity report:weight --since "last 30 days"
+
+# Energy balance cross-checked against observed weight trend
+krebslog --json report energy-balance --since "last 14 days" --include-body-trends
+
+# Agent bundles now contain a rich "body" section (latest + trends for window + profile)
+krebslog --json agent context --for hermes --since "last 30 days"
+# Example body shape (when data present):
+# "body": { "latest": { "date": "...", "weight_kg": 82.1, ... },
+#           "trends": { "weight_delta_kg": -0.6, "weight_trend": "down", ... },
+#           "profile": { "height_cm": 175.0, "date_of_birth": "..." } }
+```
+
+Set `BODYLOG_BIN` or pass `--bodylog-bin /path/to/bodylog` exactly like the other two tools. Absence is always graceful. See `spec/03-bodylog.md` and `docs/pulling.md`.
 
 ## Visuals & Telegram Bundles
 

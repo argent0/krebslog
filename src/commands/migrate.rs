@@ -1,14 +1,51 @@
 use crate::context::Context;
+use crate::db::{open_db, resolve_db_path};
 use crate::error::Result;
+use rusqlite::Connection;
 
-/// Very lightweight migrate for the krebslog *cache* DB (not the source tools).
-/// In skeleton we just acknowledge; real schema + rusqlite migrations come with caching work.
+/// Real (but minimal) migration for the krebslog *cache* DB (not the source tools).
+/// Uses PRAGMA user_version + embedded steps (pull_log + body tables for Phase 5 of spec/03).
 pub fn handle_migrate(status: bool, dry_run: bool, force: bool, ctx: &Context) -> Result<()> {
     let json = ctx.json;
     let quiet = ctx.quiet;
-    // Per spec/04 Phase 5: acknowledge that krebs/body derived fields (flux, redox, body_validation snapshots, adaptation) will live in the optional krebslog cache when the daily grain engine lands.
-    let current = 1; // bumped for body/krebs derived awareness (tables not yet materialized)
-    let latest = 1;
+    let db_override = ctx.db.as_deref();
+    let db_path = resolve_db_path(db_override);
+
+    // Open will run migrate to latest. For status we query without side effects.
+    let current = if status || dry_run {
+        // Peek at current version without forcing writes if possible.
+        match Connection::open(&db_path) {
+            Ok(conn) => conn
+                .query_row("PRAGMA user_version;", [], |row| row.get(0))
+                .unwrap_or(0),
+            Err(_) => 0,
+        }
+    } else {
+        // Normal run: open (creates + migrates)
+        match open_db(db_override) {
+            Ok(conn) => conn
+                .query_row("PRAGMA user_version;", [], |row| row.get(0))
+                .unwrap_or(0),
+            Err(e) => {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({ "success": false, "error": e.to_string() })
+                    );
+                }
+                return Err(e);
+            }
+        }
+    };
+
+    // Target is defined inside db::migrate (v2 introduces body + pull_log per spec/03-bodylog).
+    let latest = 2;
+
+    if force && !dry_run && !status {
+        // Force: re-open (idempotent) and optionally re-apply by touching a marker.
+        // Since our migrate is IF NOT EXISTS + version guard, "force" just ensures open/migrate ran.
+        let _ = open_db(db_override)?;
+    }
 
     if json {
         println!(
@@ -21,16 +58,35 @@ pub fn handle_migrate(status: bool, dry_run: bool, force: bool, ctx: &Context) -
                 "force": force,
                 "current_version": current,
                 "latest_version": latest,
-                "note": "krebslog cache v1 understands body/krebs-status derived fields (full daily aggregates + krebs_status_snapshots deferred until aggregation lands). Sources never touched."
+                "path": db_path.display().to_string(),
+                "note": "v2 adds pull_log (freshness for all sources) + body_measurements + body_profile (sparse cache of bodylog data). Never reads source tool DBs."
             })
         );
     } else if !quiet {
         if status {
-            println!("krebslog cache schema: v{} (body/krebs derived fields planned; full tables when daily grain is implemented)", current);
+            println!(
+                "krebslog cache schema: v{} (latest {}) at {}",
+                current,
+                latest,
+                db_path.display()
+            );
+            if current < latest {
+                println!(
+                    "  (run `krebslog migrate --force` to apply pending body/pull_log tables)"
+                );
+            }
+        } else if dry_run {
+            println!(
+                "migrate (dry-run): current v{}, would ensure v{} (body + pull freshness) at {}",
+                current,
+                latest,
+                db_path.display()
+            );
         } else {
             println!(
-                "migrate — would ensure v{} (krebs + body adaptation fields) if --force or needed",
-                latest
+                "migrate: ensured v{} (body_measurements + pull_log) at {}",
+                latest,
+                db_path.display()
             );
         }
     }

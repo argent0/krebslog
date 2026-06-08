@@ -2,25 +2,35 @@ use crate::cli::TelegramAction;
 use crate::commands::report::build_compact_krebs_status_for_agent;
 use crate::context::Context;
 use crate::error::Result;
+use crate::utils::{resolve_bin, run_external_json};
 
 pub fn handle_telegram(action: TelegramAction, ctx: &Context) -> Result<()> {
     let json = ctx.json;
     let quiet = ctx.quiet;
     match action {
         TelegramAction::Daily { date, with_json } => {
+            // Light body surface for daily (Phase 4): include latest weight if bodylog data is handy.
+            let body_note = get_telegram_body_note(&date, ctx);
+
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "success": true,
-                        "command": "telegram daily",
-                        "date": date,
-                        "with_json": with_json,
-                        "note": "skeleton: produces MarkdownV2 + image path in real impl"
-                    })
-                );
+                let mut out = serde_json::json!({
+                    "success": true,
+                    "command": "telegram daily",
+                    "date": date,
+                    "with_json": with_json,
+                    "note": "skeleton: produces MarkdownV2 + image path in real impl"
+                });
+                if let Some(b) = body_note {
+                    out["body"] = b;
+                }
+                println!("{}", serde_json::to_string_pretty(&out).unwrap());
             } else if !quiet {
                 println!("telegram daily --date {} (skeleton)", date);
+                if let Some(b) = body_note {
+                    if let Some(w) = b.get("weight_kg").and_then(|v| v.as_f64()) {
+                        println!("  body weight: {:.1} kg", w);
+                    }
+                }
             }
         }
         TelegramAction::Report {
@@ -89,4 +99,60 @@ pub fn handle_telegram(action: TelegramAction, ctx: &Context) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Cheap body note for telegram daily (latest weight near the date, via cache or one live call).
+fn get_telegram_body_note(date: &str, ctx: &Context) -> Option<serde_json::Value> {
+    // Reuse the light daily helper logic without pulling the whole report module into telegram if possible.
+    // Simple inline version to keep telegram light.
+    let cache_enabled = !ctx.no_cache;
+    if cache_enabled {
+        if let Ok(conn) = crate::db::open_db(ctx.db.as_deref()) {
+            if let Ok(rows) = crate::db::get_body_measurements(&conn, date, Some(date)) {
+                if let Some(m) = rows.first() {
+                    return Some(serde_json::json!({
+                        "weight_kg": m.get("weight_kg"),
+                        "date": m.get("date")
+                    }));
+                }
+            }
+            if let Ok(Some(latest)) = crate::db::get_latest_body_measurement(&conn) {
+                return Some(serde_json::json!({
+                    "weight_kg": latest.get("weight_kg"),
+                    "date": latest.get("date"),
+                    "note": "latest (not exact date)"
+                }));
+            }
+        }
+    }
+    if let Some(bin) = resolve_bin(ctx.bodylog_bin.as_deref(), &["bodylog"]) {
+        if let Ok((out, _)) = run_external_json(
+            &bin,
+            &[
+                "measurement".into(),
+                "list".into(),
+                "--since".into(),
+                date.into(),
+            ],
+        ) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+                if let Some(arr) = v.as_array() {
+                    if let Some(first) = arr.first() {
+                        if cache_enabled {
+                            if let Ok(conn) = crate::db::open_db(ctx.db.as_deref()) {
+                                if let Some(a) = v.as_array() {
+                                    let _ = crate::db::store_body_measurements(&conn, a);
+                                }
+                            }
+                        }
+                        return Some(serde_json::json!({
+                            "weight_kg": first.get("weight_kg"),
+                            "date": first.get("date")
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    None
 }

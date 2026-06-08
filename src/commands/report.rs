@@ -1,5 +1,8 @@
 use crate::cli::ReportAction;
 use crate::context::Context;
+use crate::db::{
+    get_body_measurements, get_latest_body_measurement, open_db, store_body_measurements,
+};
 use crate::error::{KrebslogError, Result};
 use crate::utils::{format_date_for_child, parse_flexible_date, resolve_bin, run_external_json};
 use chrono::{DateTime, Duration, Utc};
@@ -20,36 +23,73 @@ pub fn handle_report(action: ReportAction, ctx: &Context) -> Result<()> {
             include_image,
             output_dir,
         } => {
+            // Light body enrichment (Phase 3 of spec/03): surface latest known measurement for the date
+            // when bodylog data (cached or live) is available. Full nutrition+training daily grain is future.
+            let body_for_date = get_light_body_for_date(&date, ctx);
+
             if json {
+                let mut out = serde_json::json!({
+                    "success": true,
+                    "command": "report daily",
+                    "date": date,
+                    "include_image": include_image,
+                    "output_dir": output_dir,
+                    "note": "skeleton: full daily report + derived krebs/redox not yet implemented"
+                });
+                if let Some(b) = body_for_date {
+                    out["body"] = b;
+                }
                 println!(
                     "{}",
-                    serde_json::json!({
-                        "success": true,
-                        "command": "report daily",
-                        "date": date,
-                        "include_image": include_image,
-                        "output_dir": output_dir,
-                        "note": "skeleton: full daily report + derived krebs/redox not yet implemented"
-                    })
+                    serde_json::to_string_pretty(&out).expect("in-memory json")
                 );
             } else if !quiet {
                 println!(
                     "report daily --date {} (skeleton — not fully implemented)",
                     date
                 );
+                if let Some(b) = &body_for_date {
+                    if let Some(w) = b.get("weight_kg").and_then(|v| v.as_f64()) {
+                        println!(
+                            "  body: {:.1} kg (latest cached/live measurement near date)",
+                            w
+                        );
+                    } else {
+                        println!("  body data available (see --json)");
+                    }
+                }
                 if include_image {
                     println!("(would also produce an image)");
                 }
             }
         }
         ReportAction::Weekly { since, until } => {
+            // Light body enrichment (Phase 3): best-effort weight/body delta or presence for the window.
+            let body_window = get_light_body_for_window(&since, until.as_deref(), ctx);
+
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({ "success": true, "command": "report weekly", "since": since, "until": until, "note": "skeleton" })
-                );
+                let mut out = serde_json::json!({ "success": true, "command": "report weekly", "since": since, "until": until, "note": "skeleton" });
+                if let Some(b) = body_window {
+                    out["body"] = b;
+                }
+                println!("{}", serde_json::to_string_pretty(&out).expect("in-memory"));
             } else if !quiet {
                 println!("report weekly --since {} (skeleton)", since);
+                if let Some(b) = &body_window {
+                    if let (Some(start), Some(end)) = (
+                        b.get("start_weight").and_then(|v| v.as_f64()),
+                        b.get("end_weight").and_then(|v| v.as_f64()),
+                    ) {
+                        println!(
+                            "  body: {:.1} → {:.1} kg (delta {:.1})",
+                            start,
+                            end,
+                            end - start
+                        );
+                    } else if b.get("count").and_then(|c| c.as_i64()).unwrap_or(0) > 0 {
+                        println!("  body data present for window (see --json for details)");
+                    }
+                }
             }
         }
         ReportAction::KrebsFlux { period, output } => {
@@ -85,39 +125,67 @@ pub fn handle_report(action: ReportAction, ctx: &Context) -> Result<()> {
 
             if include_body_trends {
                 let bodylog_bin = resolve_bin(ctx.bodylog_bin.as_deref(), &["bodylog"]);
-                if let Some(bin) = &bodylog_bin {
-                    // Prefer report weight (gives stats + series); fallback to summary
-                    let call_args: Vec<String> = vec![
-                        "report".into(),
-                        "weight".into(),
-                        "--since".into(),
-                        since.clone(),
-                    ];
-                    match run_external_json(bin, &call_args) {
-                        Ok((out, _)) => {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
-                                body = Some(v);
+                let cache_enabled = !ctx.no_cache;
+
+                // Phase 5: try cache first for body trends when allowed.
+                if cache_enabled {
+                    if let Ok(conn) = open_db(ctx.db.as_deref()) {
+                        if let Ok(cached) = get_body_measurements(&conn, &since, None) {
+                            if !cached.is_empty() {
+                                body = Some(
+                                    serde_json::json!({ "series": cached, "source": "cache" }),
+                                );
                             }
                         }
-                        Err(e) => {
-                            body_notes = Some(format!("bodylog fetch failed: {}", e));
-                        }
                     }
-                    if body.is_none() {
+                }
+
+                if body.is_none() {
+                    if let Some(bin) = &bodylog_bin {
+                        // Prefer report weight (gives stats + series); fallback to summary
                         let call_args: Vec<String> = vec![
                             "report".into(),
-                            "summary".into(),
+                            "weight".into(),
                             "--since".into(),
                             since.clone(),
                         ];
-                        if let Ok((out, _)) = run_external_json(bin, &call_args) {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
-                                body = Some(serde_json::json!({ "summary": v }));
+                        match run_external_json(bin, &call_args) {
+                            Ok((out, _)) => {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+                                    body = Some(v);
+                                    if cache_enabled {
+                                        if let Ok(conn) = open_db(ctx.db.as_deref()) {
+                                            if let Some(series) = body
+                                                .as_ref()
+                                                .and_then(|b| b.get("series"))
+                                                .and_then(|s| s.as_array())
+                                            {
+                                                let _ = store_body_measurements(&conn, series);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                body_notes = Some(format!("bodylog fetch failed: {}", e));
                             }
                         }
+                        if body.is_none() {
+                            let call_args: Vec<String> = vec![
+                                "report".into(),
+                                "summary".into(),
+                                "--since".into(),
+                                since.clone(),
+                            ];
+                            if let Ok((out, _)) = run_external_json(bin, &call_args) {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+                                    body = Some(serde_json::json!({ "summary": v }));
+                                }
+                            }
+                        }
+                    } else {
+                        body_notes = Some("bodylog binary not found".to_string());
                     }
-                } else {
-                    body_notes = Some("bodylog binary not found".to_string());
                 }
             }
 
@@ -1092,44 +1160,33 @@ fn gather_web_data(start: &str, end: &str, ctx: &Context) -> GatheredData {
     }
 
     if let Some(bin) = &bodylog_bin {
-        // Fetch a compact body view for the web report (weight trends + summary)
-        if let Ok((out, _)) = run_external_json(
-            bin,
-            &[
-                "report".into(),
-                "weight".into(),
-                "--since".into(),
-                start.into(),
-                "--until".into(),
-                end.into(),
-            ],
-        ) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
-                g.body_measurements = Some(v.clone());
-                g.body_summary = Some(v);
-            }
-        } else if let Ok((out, _)) = run_external_json(
-            bin,
-            &[
-                "report".into(),
-                "summary".into(),
-                "--since".into(),
-                start.into(),
-            ],
-        ) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
-                g.body_summary = Some(v);
+        let cache_enabled = !ctx.no_cache;
+
+        // Phase 5: Prefer cached body measurements when available and cache not disabled.
+        // Cache is populated by data pull (or on-demand gathers below). Falls back to live.
+        let mut used_cache = false;
+        if cache_enabled {
+            if let Ok(conn) = open_db(ctx.db.as_deref()) {
+                if let Ok(cached) = get_body_measurements(&conn, start, Some(end)) {
+                    if !cached.is_empty() {
+                        // Use cached rows as both measurements and a lightweight "summary" stand-in.
+                        let arr_val = serde_json::json!(cached);
+                        g.body_measurements = Some(arr_val.clone());
+                        g.body_summary = Some(arr_val);
+                        used_cache = true;
+                    }
+                }
             }
         }
 
-        // Additionally fetch the raw measurement list for krebs-status adaptation
-        // (gives precise latest record across weight/fat/muscle + measurement count for caveats).
-        if g.body_measurements.is_none() {
+        if !used_cache {
+            // Live fetch (and then cache the result for future report calls).
+            // Fetch a compact body view for the web report (weight trends + summary)
             if let Ok((out, _)) = run_external_json(
                 bin,
                 &[
-                    "measurement".into(),
-                    "list".into(),
+                    "report".into(),
+                    "weight".into(),
                     "--since".into(),
                     start.into(),
                     "--until".into(),
@@ -1137,14 +1194,67 @@ fn gather_web_data(start: &str, end: &str, ctx: &Context) -> GatheredData {
                 ],
             ) {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
-                    g.body_measurements = Some(v);
+                    g.body_measurements = Some(v.clone());
+                    g.body_summary = Some(v.clone());
+                    if cache_enabled {
+                        if let Ok(conn) = open_db(ctx.db.as_deref()) {
+                            let recs =
+                                if let Some(series) = v.get("series").and_then(|s| s.as_array()) {
+                                    series.clone()
+                                } else {
+                                    vec![]
+                                };
+                            if !recs.is_empty() {
+                                let _ = store_body_measurements(&conn, &recs);
+                            }
+                        }
+                    }
+                }
+            } else if let Ok((out, _)) = run_external_json(
+                bin,
+                &[
+                    "report".into(),
+                    "summary".into(),
+                    "--since".into(),
+                    start.into(),
+                ],
+            ) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+                    g.body_summary = Some(v);
                 }
             }
-        }
 
-        if g.body_summary.is_none() && g.body_measurements.is_none() {
-            g.error_notes
-                .push("Failed to fetch body data from bodylog".into());
+            // Additionally fetch the raw measurement list for krebs-status adaptation
+            // (gives precise latest record across weight/fat/muscle + measurement count for caveats).
+            if g.body_measurements.is_none() {
+                if let Ok((out, _)) = run_external_json(
+                    bin,
+                    &[
+                        "measurement".into(),
+                        "list".into(),
+                        "--since".into(),
+                        start.into(),
+                        "--until".into(),
+                        end.into(),
+                    ],
+                ) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+                        g.body_measurements = Some(v.clone());
+                        if cache_enabled {
+                            if let Ok(conn) = open_db(ctx.db.as_deref()) {
+                                if let Some(arr) = v.as_array() {
+                                    let _ = store_body_measurements(&conn, arr);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if g.body_summary.is_none() && g.body_measurements.is_none() {
+                g.error_notes
+                    .push("Failed to fetch body data from bodylog".into());
+            }
         }
     }
 
@@ -1958,6 +2068,147 @@ fn status_from_score(s: u32) -> String {
     } else {
         "low".into()
     }
+}
+
+/// Light body lookup for daily/weekly skeletons (spec/03 Phase 3).
+/// Tries cache first (if !no_cache), then a cheap live "measurement list --since <date>" for the exact day.
+/// Returns a compact object with weight + basic comp if found.
+fn get_light_body_for_date(date: &str, ctx: &Context) -> Option<serde_json::Value> {
+    let cache_enabled = !ctx.no_cache;
+
+    // Cache first
+    if cache_enabled {
+        if let Ok(conn) = open_db(ctx.db.as_deref()) {
+            // Try exact date
+            if let Ok(rows) = get_body_measurements(&conn, date, Some(date)) {
+                if let Some(first) = rows.first().cloned() {
+                    return Some(compact_body_from_measurement(&first));
+                }
+            }
+            // Or latest overall (best effort "near" the date)
+            if let Ok(Some(latest)) = get_latest_body_measurement(&conn) {
+                return Some(compact_body_from_measurement(&latest));
+            }
+        }
+    }
+
+    // Live fallback (respect no_cache)
+    if let Some(bin) = resolve_bin(ctx.bodylog_bin.as_deref(), &["bodylog"]) {
+        // Use the flexible date as --since; ask for list and take first (newest) that matches or is close.
+        if let Ok((out, _)) = run_external_json(
+            &bin,
+            &[
+                "measurement".into(),
+                "list".into(),
+                "--since".into(),
+                date.into(),
+            ],
+        ) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+                if let Some(arr) = v.as_array() {
+                    if let Some(first) = arr.first() {
+                        // Opportunistically cache it
+                        if cache_enabled {
+                            if let Ok(conn) = open_db(ctx.db.as_deref()) {
+                                if let Some(a) = v.as_array() {
+                                    let _ = store_body_measurements(&conn, a);
+                                }
+                            }
+                        }
+                        return Some(compact_body_from_measurement(first));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn compact_body_from_measurement(m: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "date": m.get("date"),
+        "weight_kg": m.get("weight_kg"),
+        "body_fat_pct": m.get("body_fat_pct"),
+        "skeletal_muscle_pct": m.get("skeletal_muscle_pct"),
+        "source": "bodylog"
+    })
+}
+
+/// Best-effort body window summary for weekly (light enrichment).
+/// Returns count + start/end weights when >=2 measurements in/near the window.
+fn get_light_body_for_window(
+    since: &str,
+    until: Option<&str>,
+    ctx: &Context,
+) -> Option<serde_json::Value> {
+    let cache_enabled = !ctx.no_cache;
+    let mut measurements: Vec<serde_json::Value> = vec![];
+
+    if cache_enabled {
+        if let Ok(conn) = open_db(ctx.db.as_deref()) {
+            if let Ok(rows) = get_body_measurements(&conn, since, until) {
+                measurements = rows;
+            }
+        }
+    }
+
+    if measurements.is_empty() {
+        // Live attempt (best effort, one call)
+        if let Some(bin) = resolve_bin(ctx.bodylog_bin.as_deref(), &["bodylog"]) {
+            let s = since.to_string();
+            let u = until.unwrap_or("today").to_string();
+            if let Ok((out, _)) = run_external_json(
+                &bin,
+                &[
+                    "measurement".into(),
+                    "list".into(),
+                    "--since".into(),
+                    s,
+                    "--until".into(),
+                    u,
+                ],
+            ) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+                    if let Some(arr) = v.as_array() {
+                        measurements = arr.clone();
+                        if cache_enabled {
+                            if let Ok(conn) = open_db(ctx.db.as_deref()) {
+                                let _ = store_body_measurements(&conn, arr);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if measurements.is_empty() {
+        return None;
+    }
+
+    // Newest first from bodylog convention; for start/end we want chronological first/last in window.
+    let mut sorted = measurements.clone();
+    // crude sort by date string (YYYY-MM-DD sorts correctly)
+    sorted.sort_by(|a, b| {
+        let da = a.get("date").and_then(|d| d.as_str()).unwrap_or("");
+        let db = b.get("date").and_then(|d| d.as_str()).unwrap_or("");
+        da.cmp(db)
+    });
+
+    let first = sorted.first().cloned().unwrap_or(serde_json::json!({}));
+    let last = sorted.last().cloned().unwrap_or(serde_json::json!({}));
+
+    let start_w = first.get("weight_kg").and_then(|v| v.as_f64());
+    let end_w = last.get("weight_kg").and_then(|v| v.as_f64());
+
+    Some(serde_json::json!({
+        "count": sorted.len(),
+        "start_weight": start_w,
+        "end_weight": end_w,
+        "start_date": first.get("date"),
+        "end_date": last.get("date"),
+        "source": "bodylog"
+    }))
 }
 
 fn build_krebs_steps(

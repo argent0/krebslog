@@ -91,13 +91,34 @@ pub fn handle_image(action: ImageAction, ctx: &Context) -> Result<()> {
             output,
         } => {
             let detail = format!("date={}, layout={}, out={:?}", date, layout, output);
+            // Light body context prep (Phase 4) so a future renderer can add a weight strip.
+            let mut body_ctx: Option<serde_json::Value> = None;
+            if let Some(bin) = resolve_bin(ctx.bodylog_bin.as_deref(), &["bodylog"]) {
+                if let Ok((out, _)) = run_external_json(
+                    &bin,
+                    &[
+                        "report".into(),
+                        "weight".into(),
+                        "--since".into(),
+                        date.clone(),
+                    ],
+                ) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
+                        body_ctx = Some(serde_json::json!({ "source": "bodylog", "weight": v }));
+                    }
+                }
+            }
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({ "success": true, "command": "image full-dashboard", "detail": detail, "note": "not implemented (skeleton); body context available via krebs-cycle --include-body-context" })
-                );
+                let mut resp = serde_json::json!({ "success": true, "command": "image full-dashboard", "detail": detail, "note": "not implemented (skeleton); body context prepared when available" });
+                if let Some(b) = body_ctx {
+                    resp["body_context"] = b;
+                }
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap());
             } else if !quiet {
                 println!("image full-dashboard — {}", detail);
+                if body_ctx.is_some() {
+                    println!("  (body context prepared)");
+                }
             }
         }
     }

@@ -1,5 +1,6 @@
 use crate::cli::DataAction;
 use crate::context::Context;
+use crate::db::{open_db, record_pull, store_body_measurements};
 use crate::error::{KrebslogError, Result};
 use crate::utils::{format_date_for_child, parse_flexible_date, resolve_bin, run_external_json};
 use chrono::{Duration, Utc};
@@ -29,10 +30,17 @@ fn handle_status(probe: bool, ctx: &Context) -> Result<()> {
     let nutlog_override = ctx.nutlog_bin.as_deref();
     let repslog_override = ctx.repslog_bin.as_deref();
     let bodylog_override = ctx.bodylog_bin.as_deref();
+    let db_override = ctx.db.as_deref();
 
     let nutlog_bin = resolve_bin(nutlog_override, &["nutlog"]);
     let repslog_bin = resolve_bin(repslog_override, &["repslog"]);
     let bodylog_bin = resolve_bin(bodylog_override, &["bodylog"]);
+
+    // Real last_pull from krebslog's optional cache (populated on successful pulls).
+    // We show history even under --no-cache (the flag only forces live *data* calls).
+    let last_nut = get_cached_last_pull(db_override, "nutlog");
+    let last_rep = get_cached_last_pull(db_override, "repslog");
+    let last_body = get_cached_last_pull(db_override, "bodylog");
 
     let mut sources: Vec<Value> = vec![];
 
@@ -42,7 +50,7 @@ fn handle_status(probe: bool, ctx: &Context) -> Result<()> {
             "source": "nutlog",
             "bin": b,
             "available": true,
-            "last_pull": null,   // TODO: from cache when implemented
+            "last_pull": last_nut,
             "entities": ["consumption", "purchase", "report:nutrition"]
         });
         if probe {
@@ -89,7 +97,7 @@ fn handle_status(probe: bool, ctx: &Context) -> Result<()> {
             "source": "repslog",
             "bin": b,
             "available": true,
-            "last_pull": null,
+            "last_pull": last_rep,
             "entities": ["workout", "stats:summary", "stats:volume"]
         });
         if probe {
@@ -118,7 +126,7 @@ fn handle_status(probe: bool, ctx: &Context) -> Result<()> {
             "source": "bodylog",
             "bin": b,
             "available": true,
-            "last_pull": null,
+            "last_pull": last_body,
             "entities": ["measurement", "report:summary", "report:weight", "config"]
         });
         if probe {
@@ -204,6 +212,8 @@ fn handle_pull(
     let nutlog_override = ctx.nutlog_bin.as_deref();
     let repslog_override = ctx.repslog_bin.as_deref();
     let bodylog_override = ctx.bodylog_bin.as_deref();
+    let no_cache = ctx.no_cache;
+    let db_override = ctx.db.as_deref();
 
     // Resolve effective since/until
     let (since_eff, until_eff) = resolve_period(&since, until.as_deref(), period.as_deref())?;
@@ -227,6 +237,8 @@ fn handle_pull(
             json,
             quiet,
             nutlog_override,
+            !no_cache,
+            db_override,
         )?;
         pull_repslog_default(
             &since_str,
@@ -235,6 +247,8 @@ fn handle_pull(
             json,
             quiet,
             repslog_override,
+            !no_cache,
+            db_override,
         )?;
         pull_bodylog_default(
             &since_str,
@@ -243,6 +257,8 @@ fn handle_pull(
             json,
             quiet,
             bodylog_override,
+            !no_cache,
+            db_override,
         )?;
         if json {
             // Already emitted per-source success objects or arrays; emit a top level ack if nothing was printed.
@@ -266,6 +282,8 @@ fn handle_pull(
                 json,
                 quiet,
                 nutlog_override,
+                !no_cache,
+                db_override,
             )
         }
         "repslog" => {
@@ -278,6 +296,8 @@ fn handle_pull(
                 json,
                 quiet,
                 repslog_override,
+                !no_cache,
+                db_override,
             )
         }
         "bodylog" => {
@@ -290,6 +310,8 @@ fn handle_pull(
                 json,
                 quiet,
                 bodylog_override,
+                !no_cache,
+                db_override,
             )
         }
         other => Err(KrebslogError::UnknownSource(other.to_string())),
@@ -325,6 +347,7 @@ fn resolve_period(
     Ok((since_dt, until_dt))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pull_nutlog_default(
     since: &str,
     until: Option<&str>,
@@ -332,6 +355,8 @@ fn pull_nutlog_default(
     json: bool,
     quiet: bool,
     override_bin: Option<&str>,
+    cache_enabled: bool,
+    db_override: Option<&str>,
 ) -> Result<()> {
     // Default entities we care about for metabolic picture:
     // - consumption (primary nutrition intake)
@@ -344,6 +369,8 @@ fn pull_nutlog_default(
         json,
         quiet,
         override_bin,
+        cache_enabled,
+        db_override,
     )?;
     // Optionally also surface a nutrition report for the window (very useful aggregate)
     pull_nutlog_entity(
@@ -354,10 +381,13 @@ fn pull_nutlog_default(
         json,
         quiet,
         override_bin,
+        cache_enabled,
+        db_override,
     )?;
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pull_nutlog_entity(
     entity: &str,
     since: &str,
@@ -366,6 +396,8 @@ fn pull_nutlog_entity(
     json: bool,
     quiet: bool,
     override_bin: Option<&str>,
+    cache_enabled: bool,
+    db_override: Option<&str>,
 ) -> Result<()> {
     let bin =
         resolve_bin(override_bin, &["nutlog"]).ok_or_else(|| KrebslogError::ExternalTool {
@@ -452,8 +484,17 @@ fn pull_nutlog_entity(
 
     let (stdout, _stderr) = run_external_json(&bin, &args)?;
 
+    // Record pull for freshness in data status (bodylog also stores rows).
+    if cache_enabled {
+        if let Ok(v) = serde_json::from_str::<Value>(&stdout) {
+            let count = v.as_array().map(|a| a.len() as i64);
+            if let Ok(conn) = open_db(db_override) {
+                let _ = record_pull(&conn, "nutlog", entity, since, until, count);
+            }
+        }
+    }
+
     // Pass the JSON (or text) through. For agents this is the raw material.
-    // When we have cache we would parse + store here.
     if stdout.trim().is_empty() {
         if json {
             println!(
@@ -465,13 +506,13 @@ fn pull_nutlog_entity(
         }
     } else {
         // Emit exactly what the child produced (already --json from child when we asked).
-        // If the child produced non-JSON (shouldn't happen), we still forward.
         println!("{}", stdout.trim_end());
     }
 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pull_repslog_default(
     since: &str,
     until: Option<&str>,
@@ -479,8 +520,20 @@ fn pull_repslog_default(
     json: bool,
     quiet: bool,
     override_bin: Option<&str>,
+    cache_enabled: bool,
+    db_override: Option<&str>,
 ) -> Result<()> {
-    pull_repslog_entity("workout", since, until, dry_run, json, quiet, override_bin)?;
+    pull_repslog_entity(
+        "workout",
+        since,
+        until,
+        dry_run,
+        json,
+        quiet,
+        override_bin,
+        cache_enabled,
+        db_override,
+    )?;
     // Also pull a stats summary for the window (good aggregate)
     pull_repslog_entity(
         "stats:summary",
@@ -490,10 +543,13 @@ fn pull_repslog_default(
         json,
         quiet,
         override_bin,
+        cache_enabled,
+        db_override,
     )?;
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pull_repslog_entity(
     entity: &str,
     since: &str,
@@ -502,6 +558,8 @@ fn pull_repslog_entity(
     json: bool,
     quiet: bool,
     override_bin: Option<&str>,
+    cache_enabled: bool,
+    db_override: Option<&str>,
 ) -> Result<()> {
     let bin =
         resolve_bin(override_bin, &["repslog"]).ok_or_else(|| KrebslogError::ExternalTool {
@@ -585,6 +643,15 @@ fn pull_repslog_entity(
 
     let (stdout, _stderr) = run_external_json(&bin, &args)?;
 
+    if cache_enabled {
+        if let Ok(v) = serde_json::from_str::<Value>(&stdout) {
+            let count = v.as_array().map(|a| a.len() as i64);
+            if let Ok(conn) = open_db(db_override) {
+                let _ = record_pull(&conn, "repslog", entity, since, until, count);
+            }
+        }
+    }
+
     if stdout.trim().is_empty() {
         if json {
             println!(
@@ -603,6 +670,7 @@ fn pull_repslog_entity(
 
 // ---------------- bodylog support ----------------
 
+#[allow(clippy::too_many_arguments)]
 fn pull_bodylog_default(
     since: &str,
     until: Option<&str>,
@@ -610,6 +678,8 @@ fn pull_bodylog_default(
     json: bool,
     quiet: bool,
     override_bin: Option<&str>,
+    cache_enabled: bool,
+    db_override: Option<&str>,
 ) -> Result<()> {
     // Default entities for bodylog in a metabolic context:
     // - measurement list (raw daily measurements)
@@ -622,6 +692,8 @@ fn pull_bodylog_default(
         json,
         quiet,
         override_bin,
+        cache_enabled,
+        db_override,
     )?;
     pull_bodylog_entity(
         "report:summary",
@@ -631,10 +703,13 @@ fn pull_bodylog_default(
         json,
         quiet,
         override_bin,
+        cache_enabled,
+        db_override,
     )?;
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pull_bodylog_entity(
     entity: &str,
     since: &str,
@@ -643,6 +718,8 @@ fn pull_bodylog_entity(
     json: bool,
     quiet: bool,
     override_bin: Option<&str>,
+    cache_enabled: bool,
+    db_override: Option<&str>,
 ) -> Result<()> {
     let bin =
         resolve_bin(override_bin, &["bodylog"]).ok_or_else(|| KrebslogError::ExternalTool {
@@ -785,6 +862,29 @@ fn pull_bodylog_entity(
 
     let (stdout, _stderr) = run_external_json(&bin, &args)?;
 
+    // Cache the result (if enabled) for body data and freshness.
+    // We do this for measurement lists and for reports that can supply per-day series.
+    if cache_enabled {
+        if let Ok(v) = serde_json::from_str::<Value>(&stdout) {
+            // record the pull
+            record_pull_for_body(db_override, entity, since, until, &v);
+
+            // Try to extract and store actual measurement rows for later use by reports/agent.
+            let records = extract_body_records(&v);
+            if !records.is_empty() {
+                if let Ok(conn) = open_db(db_override) {
+                    let _ = store_body_measurements(&conn, &records);
+                }
+            }
+            // Also cache profile if this was a config pull
+            if entity == "config" || entity == "profile" {
+                if let Ok(conn) = open_db(db_override) {
+                    let _ = crate::db::store_body_profile(&conn, &v);
+                }
+            }
+        }
+    }
+
     if stdout.trim().is_empty() {
         if json {
             println!(
@@ -799,6 +899,44 @@ fn pull_bodylog_entity(
     }
 
     Ok(())
+}
+
+/// Record pull_log entry for bodylog pulls (and also attempt to count rows when obvious).
+fn record_pull_for_body(
+    db_override: Option<&str>,
+    entity: &str,
+    since: &str,
+    until: Option<&str>,
+    parsed: &Value,
+) {
+    let count = if let Some(arr) = parsed.as_array() {
+        Some(arr.len() as i64)
+    } else if let Some(series) = parsed.get("series").and_then(|s| s.as_array()) {
+        Some(series.len() as i64)
+    } else if let Some(w) = parsed.get("weight").or_else(|| parsed.get("body_fat")) {
+        w.get("count").and_then(|c| c.as_i64())
+    } else {
+        None
+    };
+    if let Ok(conn) = open_db(db_override) {
+        let _ = record_pull(&conn, "bodylog", entity, since, until, count);
+    }
+}
+
+/// Extract an array of measurement-like records from either:
+/// - a direct array (bodylog measurement list)
+/// - a report object containing a "series" array
+/// - a summary that has nested per-metric objects (best effort, may be sparse)
+fn extract_body_records(v: &Value) -> Vec<Value> {
+    if let Some(arr) = v.as_array() {
+        return arr.clone();
+    }
+    if let Some(series) = v.get("series").and_then(|s| s.as_array()) {
+        return series.clone();
+    }
+    // For summary shapes, we don't have per-day here; the caller will have also pulled "measurement".
+    // Still, surface the top-level weight etc stats as a single pseudo-record for last_pull only.
+    vec![]
 }
 
 fn days_from_since(since: &str) -> Option<i64> {
@@ -819,4 +957,14 @@ fn days_from_since(since: &str) -> Option<i64> {
         }
     }
     None
+}
+
+/// Best-effort last successful pull timestamp for a source from the optional cache.
+/// Returns RFC3339 string or null (as JSON null via Option in caller sites).
+fn get_cached_last_pull(db_override: Option<&str>, source: &str) -> Option<String> {
+    // We deliberately ignore ctx.no_cache here: last_pull is historical metadata.
+    match open_db(db_override) {
+        Ok(conn) => crate::db::get_last_pull_for_source(&conn, source).unwrap_or(None),
+        Err(_) => None,
+    }
 }

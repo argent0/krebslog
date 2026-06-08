@@ -108,7 +108,9 @@ cargo test
 # Typical development flow
 cargo run -- --json data status --probe
 cargo run -- --json data pull --all --period "last 30 days"
+cargo run -- --json data pull --source bodylog --entity measurement --since "last 14 days"
 cargo run -- --json report daily --date today
+cargo run -- --json report energy-balance --since "last 14 days" --include-body-trends
 cargo run -- --json report krebs-status --since "last 14 days"   # body-validated flux + adaptation
 cargo run -- --json report web --period "last 30 days" --output ./reports/
 cargo run -- --json agent context --for hermes --since "last 30 days"

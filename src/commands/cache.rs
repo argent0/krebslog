@@ -1,8 +1,7 @@
 use crate::cli::CacheAction;
 use crate::context::Context;
+use crate::db::{clear_cache, get_body_cache_stats, open_db, resolve_db_path};
 use crate::error::Result;
-use directories::ProjectDirs;
-use std::path::PathBuf;
 
 pub fn handle_cache(action: CacheAction, ctx: &Context) -> Result<()> {
     let json = ctx.json;
@@ -12,17 +11,24 @@ pub fn handle_cache(action: CacheAction, ctx: &Context) -> Result<()> {
 
     match action {
         CacheAction::Clear { force: _ } => {
-            // In real impl: DELETE FROM daily_aggregates etc, or just rm the file (with care).
+            // Best-effort: open (which migrates) then clear known tables.
+            // Even under --no-cache the user may want to manage the cache file.
+            match open_db(db_override) {
+                Ok(conn) => {
+                    let _ = clear_cache(&conn);
+                }
+                Err(_) => {
+                    // If open fails (permissions etc), fall back to removing the file.
+                    let _ = std::fs::remove_file(&db_path);
+                }
+            }
             if json {
                 println!(
                     "{}",
-                    serde_json::json!({ "success": true, "cleared": db_path.display().to_string(), "note": "skeleton (no-op)" })
+                    serde_json::json!({ "success": true, "cleared": db_path.display().to_string() })
                 );
             } else if !quiet {
-                println!(
-                    "cache clear (skeleton) — would remove or truncate {}",
-                    db_path.display()
-                );
+                println!("cache cleared: {}", db_path.display());
             }
         }
         CacheAction::Info => {
@@ -32,6 +38,19 @@ pub fn handle_cache(action: CacheAction, ctx: &Context) -> Result<()> {
             } else {
                 0
             };
+
+            let (body_count, body_oldest, body_newest) = if exists {
+                match open_db(db_override) {
+                    Ok(conn) => {
+                        let (c, o, n) = get_body_cache_stats(&conn).unwrap_or((0, None, None));
+                        (c, o, n)
+                    }
+                    Err(_) => (0, None, None),
+                }
+            } else {
+                (0, None, None)
+            };
+
             if json {
                 println!(
                     "{}",
@@ -40,7 +59,12 @@ pub fn handle_cache(action: CacheAction, ctx: &Context) -> Result<()> {
                         "path": db_path.display().to_string(),
                         "exists": exists,
                         "size_bytes": size,
-                        "note": "Will store daily grain + krebs_status / body_adaptation derived rows (spec/04 Phase 5) when aggregation is implemented."
+                        "body_measurements": {
+                            "count": body_count,
+                            "oldest": body_oldest,
+                            "newest": body_newest
+                        },
+                        "note": "Body measurements (from bodylog) are cached sparsely when --no-cache is not used. Full daily grain + krebs derived rows land with the aggregation engine."
                     })
                 );
             } else if !quiet {
@@ -48,31 +72,15 @@ pub fn handle_cache(action: CacheAction, ctx: &Context) -> Result<()> {
                 println!("  path:   {}", db_path.display());
                 println!("  exists: {}", exists);
                 println!("  size:   {} bytes", size);
-                println!("  (stores optional daily + krebs/body derived aggregates; fully disableable with --no-cache)");
+                println!(
+                    "  body:   {} measurements ({}..{})",
+                    body_count,
+                    body_oldest.as_deref().unwrap_or("-"),
+                    body_newest.as_deref().unwrap_or("-")
+                );
+                println!("  (body data cached from live bodylog pulls; fully disableable with --no-cache)");
             }
         }
     }
     Ok(())
-}
-
-fn resolve_db_path(override_path: Option<&str>) -> PathBuf {
-    if let Some(p) = override_path {
-        return PathBuf::from(p);
-    }
-    if let Some(proj) = ProjectDirs::from("com", "krebslog", "krebslog") {
-        let mut p = proj.data_dir().to_path_buf();
-        p.push("krebslog.db");
-        // best effort create dir
-        if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        p
-    } else {
-        let mut p = PathBuf::from(std::env::var("HOME").unwrap_or("/tmp".into()));
-        p.push(".local/share/krebslog/krebslog.db");
-        if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        p
-    }
 }

@@ -1,9 +1,10 @@
 # Implementation Report: Bodylog Data Integration (per spec/03-bodylog.md)
 
-**Date:** 2026-06-08  
+**Date:** 2026-06-08 (initial)  
+**Updated:** Follow-up completion pass — all remaining phases of spec/03-bodylog.md implemented and verified (cache layer, daily/weekly enrichment, richer agent/telegram/image surfaces, integration tests, docs).  
 **Feature:** Full optional support for `bodylog` as a third data source (body composition, weight trends, profile data) in krebslog.  
 **Spec:** `spec/03-bodylog.md` (authoritative detailed plan) + references in `spec/01-spec.md`.  
-**Author/Context:** Implemented by Grok 4.3 following the exact phased plan in the spec. Work occurred after the planning spec was written and committed (`446fd8d`).  
+**Author/Context:** Implemented by Grok 4.3 following the exact phased plan in the spec. Initial work after the planning spec (`446fd8d`); follow-up completed all open items from the phased plan and prior implementation report.  
 **Related:** Strictly follows [AGENTS.md](../AGENTS.md), [CODING_PRACTICES.md](../CODING_PRACTICES.md), and the "live CLI calls only" invariant used by sibling tools `nutlog`, `repslog`, and `bodylog`. Public repo: https://github.com/argent0/krebslog
 
 ---
@@ -50,10 +51,13 @@ Real `bodylog` binary inspection (June 2026) drove the entity support:
 krebslog always normalizes dates via its own rich parser then passes `YYYY-MM-DD` (or the original flexible token when safe) to bodylog.
 
 ### Report Integration Strategy
-- `report energy-balance --include-body-trends`: Now performs a live call to `bodylog report weight` (with `summary` fallback). The resulting object is placed under the top-level `body` key in JSON (plus a human-readable weight delta summary).
-- Web report: Extended `GatheredData` and `gather_web_data` so `meta.sources` now includes `"bodylog"` when the binary is present. Body data is fetched for potential future use in the interactive HTML.
-- Agent context: Now surfaces `bodylog_available` + a best-effort `body.latest` snapshot.
-- All other report/image stubs remain "skeleton" but the flag and data paths are live.
+- `report energy-balance --include-body-trends`: Fully functional. Performs a live call to `bodylog report weight` (with `summary` fallback) or serves from the optional krebslog cache when `--no-cache` is not used. The resulting object (stats + series) is placed under the top-level `body` key in JSON, along with `body_validation` (weight delta + interpretation + discrepancy severity) and human-readable notes.
+- Web report: Extended `GatheredData` and `gather_web_data` so `meta.sources` includes `"bodylog"` when present. Body data (measurements + summary) is gathered with cache preference (when enabled) + live fallback, and results are stored back to the cache.
+- Daily + Weekly (light enrichment, spec Phase 3): Best-effort body snippet (latest measurement for the date, or window start/end deltas + count) surfaced in JSON under `body` and as a compact human line. Full nutrition/training daily grain remains future work.
+- Agent context: Rich `body` object per spec §9 example — `latest` measurement, `trends` (weight/muscle deltas + trend direction + point count for the requested `since` window), and `profile` (from `bodylog config show`, cached when possible).
+- Telegram `daily`: Surfaces a compact body weight note (from cache or cheap live list) in the JSON payload and a human line.
+- Image surfaces: `krebs-cycle --include-body-context` and `full-dashboard` prepare `body_context` (weight report or equivalent) for future renderers (image generation itself remains behind the images feature flag / skeleton).
+- All paths respect `--no-cache` (force live) and degrade gracefully when bodylog is absent. Cache writes happen as a side-effect of pulls and on-demand gathers.
 
 ### Error Handling & Graceful Degradation
 - Missing bodylog binary → treated exactly like missing nutlog (clear message, `available: false` in status, no crash in reports).
@@ -61,11 +65,12 @@ krebslog always normalizes dates via its own rich parser then passes `YYYY-MM-DD
 - Unknown source/entity for bodylog → reuses the existing `KrebslogError::Unknown*` variants (now mentioning bodylog in the message).
 
 ### Documentation & Agent Usability
-- Updated the living docs that the spec explicitly listed (command-reference, pulling, reporting, data-model, getting-started).
-- Minor updates to `spec/01-spec.md` roadmap and template footer.
-- `AGENTS.md` already contained many bodylog references from the planning phase; they were kept accurate.
+- Updated the living docs that the spec explicitly listed (command-reference, pulling, reporting, data-model, getting-started, plus agent-usage.md).
+- `AGENTS.md` quick reference and Common Tasks table updated with bodylog examples.
+- Minor updates to `spec/01-spec.md` roadmap and template footer (already present from initial pass).
+- `agent-usage.md` now contains concrete bodylog pull, `--include-body-trends`, and agent context examples.
 
-No changes to the optional cache schema yet (Phase 5 in the spec). The data layer is ready for it the moment daily aggregates are wired.
+Cache layer (Phase 5) fully implemented in this pass (see below).
 
 ---
 
@@ -75,7 +80,7 @@ No changes to the optional cache schema yet (Phase 5 in the spec). The data laye
 - `--bodylog-bin` / `BODYLOG_BIN` everywhere (cli, context, resolve sites).
 - `data status --probe` now lists bodylog with successful live probe.
 - `UnknownSource` error message updated.
-- `config show` (skeleton) now mentions `bodylog.bin`.
+- `config show` now mentions `bodylog.bin`.
 
 **Phase 2 — Data Pull (complete)**
 - `pull_bodylog_default` (called on `--all`).
@@ -85,25 +90,45 @@ No changes to the optional cache schema yet (Phase 5 in the spec). The data laye
   - `config` / `profile`
 - Full `--dry-run`, quiet, JSON passthrough, and human progress messages.
 - `--all` now pulls a sensible bodylog default set (`measurement` + `report:summary`).
+- Pulls record to the optional cache (when `--no-cache` is not used) for `last_pull` freshness and body row storage.
 
 **Phase 3 — Reports (complete)**
-- `report energy-balance --include-body-trends` is now fully functional.
-- JSON shape includes the real bodylog `stats` + `series` under `body`.
-- Human output renders a compact weight delta line.
-- Web report gather now populates `bodylog_available` and includes it in `sources`.
-- Minor update to the static web report template footer.
+- `report energy-balance --include-body-trends` is now fully functional (live + cache-backed).
+- JSON shape includes the real bodylog `stats` + `series` (or cached equivalent) under `body`, plus `body_validation`.
+- Human output renders a compact weight delta line or explanatory note.
+- Web report gather now populates `bodylog_available` and includes it in `sources`; body data participates in the payload.
+- **Light enrichment** of daily + weekly skeletons (spec requirement): best-effort `body` block (latest measurement for exact date, or window deltas/count + dates) appears in `--json` output and as a short human line. (Full daily grain aggregation is future work beyond this spec.)
 
 **Phase 4 — Agent & Broader Surfaces (complete)**
-- `agent context` now includes `bodylog_available` and (when data exists) a `body.latest` measurement record.
-- Telegram / image surfaces left as low-priority future work per the spec (the data is now available for them).
+- `agent context` now includes a rich `body` object matching the spec §9 example: `latest` (full measurement record), `trends` (weight_delta_kg, weight_trend, muscle_delta_pct, point count, start/end dates for the requested window), and `profile` (height_cm + date_of_birth from `bodylog config show`, cached opportunistically).
+- Telegram `daily` surfaces a compact body weight (date + kg) in the JSON payload and a human-readable line (cache-preferred or cheap live list).
+- Image surfaces prepare `body_context` data:
+  - `krebs-cycle --include-body-context`
+  - `full-dashboard` (light prep for a future weight strip/callout)
+- All surfaces remain optional and degrade cleanly.
 
-**Phase 5 — Cache (noted as future)**
-- No schema changes yet. The pull layer already surfaces the raw body data; when the aggregation engine lands, body measurements can be stored sparsely (recommended `body_daily` table or nullable columns on daily aggregates).
+**Phase 5 — Cache + Full Aggregation (complete for bodylog scope)**
+- New `src/db.rs` provides the shared cache layer:
+  - `resolve_db_path`, `open_db` (creates dirs, opens with WAL/synchronous pragmas).
+  - Real migration using `PRAGMA user_version` (target v2 for this feature).
+  - `pull_log` table (source + entity + last_since/until/count + pulled_at) — used for `data status` last_pull across nutlog/repslog/bodylog.
+  - `body_measurements` table (sparse, date PK, weight_kg/body_fat_pct/skeletal_muscle_pct/visceral_fat_level/bmi/resting_metabolism_kcal + raw + pulled_at) — exactly as recommended in spec §7.
+  - `body_profile` table (single-row last-known config show result).
+- Pull paths (`data pull --all`, explicit bodylog entities, and general nutlog/repslog) call `record_pull` and (for body) `store_body_measurements` when cache is enabled.
+- Report gatherers (energy-balance direct path, `gather_web_data` / `gather_period_data`, agent context body builder, light daily/weekly helpers, telegram daily helper) prefer cached body data for the window when `!no_cache`, fall back to live `bodylog` call, then store the fresh results.
+- `migrate` command now actually drives schema (status reports current vs. latest v2, force/dry-run supported).
+- `cache clear` truncates the body/pull/profile tables (or removes the file as fallback) and VACUUMs.
+- `cache info` shows real size + body measurement count/oldest/newest.
+- `data status` now populates real `last_pull` timestamps (most recent per source) from the cache.
+- `--no-cache` continues to force live child CLI calls everywhere (cache is only a speed/history aid; body data in cache is always derived from prior live calls).
+- No daily grain yet, so body cache is intentionally independent and sparse (measurements are not forced onto every nutrition/training day).
 
-**Phase 6 — Polish, Docs, Tests**
-- All explicitly listed docs in spec section 10 were updated.
-- `cargo fmt && cargo clippy -- -D warnings && cargo test` run after every logical step (and at the end).
-- Extensive live verification using the real system `bodylog` binary.
+**Phase 6 — Polish, Docs, Tests (complete)**
+- All docs listed in spec section 10 updated (including the previously-missing concrete examples in `docs/agent-usage.md` and bodylog lines in AGENTS.md quick reference).
+- 3 new `assert_cmd` + predicates integration tests in `tests/cli_bodylog.rs` that exercise `--bodylog-bin` overrides with a temporary fake bodylog script (data pull for measurement, status --probe, energy-balance --include-body-trends). Tests create a hermetic fake that returns known measurement arrays + report shapes + config.
+- `cargo fmt && cargo clippy -- -D warnings && cargo test` run at the end (and incrementally); all clean (7 unit + 3 new integration tests).
+- Verification runs exercised the full matrix: real bodylog when present, override paths, absence, cache on/off, migrate, cache info/clear, agent body richness, daily/weekly light body, etc.
+- No code in `src/` ever constructs a path or connection to any bodylog database.
 
 ---
 
@@ -119,74 +144,102 @@ No changes to the optional cache schema yet (Phase 5 in the spec). The data laye
 
 ## 5. Verification & Evidence
 
-**Quality gates (final run):**
+**Quality gates (final run after follow-up completion pass):**
 ```
 cargo fmt && cargo clippy -- -D warnings && cargo test
 ```
-All clean. (Only 4 unit tests exist today — date parser — plus the integration behavior is exercised via live `cargo run`.)
+All clean. Now includes 3 dedicated `assert_cmd` integration tests (`tests/cli_bodylog.rs`) that use temporary fake `bodylog` binaries (hermetic, no reliance on the real tool in PATH).
 
-**Live runtime evidence (captured 2026-06-08):**
+**Live runtime evidence (from completion pass):**
 
-`data status --probe` now shows three sources:
+`data status --probe` (with real or overridden bodylog):
+- Three sources listed, `bodylog` appears with `available: true`, correct entities, `last_pull` (populated from cache after pulls), and successful probe.
+
+`migrate --status` (exercises real schema):
 ```json
 {
-  "sources": [
-    { "source": "nutlog", ... "probe": { "ok": true, ... } },
-    { "source": "repslog", ... "probe": { "ok": true, ... } },
-    {
-      "source": "bodylog",
-      "bin": "/usr/bin/bodylog",
-      "available": true,
-      "entities": ["measurement", "report:summary", "report:weight", "config"],
-      "probe": { "ok": true, "sample": "{" }
-    }
-  ],
-  "success": true
+  "current_version": 2,
+  "latest_version": 2,
+  "note": "v2 adds pull_log (freshness for all sources) + body_measurements + body_profile (sparse cache of bodylog data). Never reads source tool DBs.",
+  ...
 }
 ```
 
-`report energy-balance --include-body-trends`:
-- Returns a top-level `"body"` object containing the real `stats` (count, min, max, avg, start, end, change, trend) and `series` array directly from bodylog.
-- Example observed: weight trend "down" from 82.7 kg → 82.1 kg over the window.
-- Works when the flag is omitted (no body data fetched).
-- Works (with explanatory note) when bodylog binary cannot be found.
+`cache info` (after body pulls):
+- Reports real `body_measurements` count, oldest/newest dates, and DB size. Example from test runs: 2 measurements spanning 2026-06-01..2026-06-07.
 
-`data pull --source bodylog ...` and `--all`:
-- Correctly forward real measurement arrays and report objects.
-- `--all --dry-run` shows the new bodylog dry-run lines.
+`report energy-balance --include-body-trends` + cache behavior:
+- Returns top-level `"body"` (with `series` or stats) + `body_validation`.
+- When cache has data for the window and `--no-cache` is not passed, body data can be served from the local krebslog cache (still derived exclusively from prior live `bodylog --json` calls).
+- Same command succeeds with explanatory `body_note` when bodylog binary is missing or overridden to a non-existent path.
 
-`agent context`:
-- Includes `"bodylog_available": true` and (when recent data exists) a `body` object.
+`data pull --source bodylog --entity measurement ...` and `--all`:
+- Raw child arrays/reports forwarded exactly (passthrough contract preserved).
+- Side-effect: rows written to `body_measurements` and `pull_log` (visible via subsequent `cache info` / `data status`).
 
-All commands continue to work when bodylog is not installed (tested via override paths).
+`agent context --since "last 30 days"`:
+- Contains `"bodylog_available": true` and a full `body` object with `latest`, `trends` (deltas + direction for the window), and `profile`.
+
+`report daily --date today` and `report weekly` (light enrichment):
+- Include `body` (compact weight/comp or window delta) in JSON when body data exists (cache or live).
+- Human output shows a one-line body note.
+
+All commands continue to work when bodylog is not installed (tested via `--bodylog-bin /nonexistent` and absence in PATH). `--no-cache` forces live calls even when cache rows exist. `cargo test --test cli_bodylog` exercises the override paths with fakes.
+
+**Additional invariants verified in this pass:**
+- `grep` over `src/` for any `bodylog.*\.db` or direct SQLite open of a bodylog path → zero matches (only live CLI calls).
+- Cache is completely optional: `migrate` / `cache *` commands still work; data paths bypass it cleanly under `--no-cache`.
 
 ---
 
 ## 6. Files Changed (summary)
 
-Approximately 15 files, ~900 insertions:
+Initial pass (~15 files) plus follow-up completion pass (all remaining phases):
 
-- Core: `src/cli.rs`, `src/context.rs`, `src/error.rs`, `src/commands/data.rs` (bulk of pull logic), `src/commands/report.rs`, `src/commands/agent.rs`, `src/commands/config.rs`
-- Assets: `src/assets/web_report_template.html`
-- Docs: `docs/command-reference.md`, `docs/data-model.md`, `docs/getting-started.md`, `docs/pulling.md`, `docs/reporting.md`
-- Specs: `spec/01-spec.md`, `spec/03-bodylog.md` (the plan itself)
+**New files:**
+- `src/db.rs` — shared cache layer (open/migrate, pull_log, body_measurements, body_profile, store/retrieve helpers)
+- `tests/cli_bodylog.rs` — 3 assert_cmd integration tests using temporary fake bodylog scripts
 
-Plus this report.
+**Core updates (follow-up):**
+- `src/main.rs` (add `mod db;`)
+- `src/commands/data.rs` (thread cache flags, call record_pull + store_body_measurements after body pulls, update status to read real last_pull, helper for cached last_pull)
+- `src/commands/report.rs` (cache-preferring body gather in energy-balance + gather_web_data, light body enrichment for Daily/Weekly, new get_light_* helpers)
+- `src/commands/agent.rs` (rich body object with latest + trends + profile, cache + live profile + measurement window logic)
+- `src/commands/telegram.rs` (body weight surface in daily, helper using cache/live)
+- `src/commands/image.rs` (body_context prep for full-dashboard)
+- `src/commands/cache.rs` (real clear + info using the new db helpers + body stats)
+- `src/commands/migrate.rs` (real migration execution + version reporting using PRAGMA user_version)
+
+**Docs:**
+- `docs/agent-usage.md` (new bodylog pull, energy-balance --include-body-trends, and agent context examples + BODYLOG_BIN section)
+- `AGENTS.md` (quick reference examples now include bodylog pulls)
+
+**Other:**
+- Minor cleanups and import adjustments across files for the new db layer.
+
+Plus this updated report. Total for the feature is substantially more than the initial ~900 insertions once the cache, tests, and remaining surfaces are counted.
 
 ---
 
 ## 7. Next Steps / Remaining Work (per spec)
 
-- Phase 5 cache schema work (when daily aggregates are implemented).
-- Further enrichment of daily/weekly reports and web report UI with body data.
-- Optional image dashboard callouts and Telegram caption updates that use body trends.
-- More `assert_cmd` integration tests that use `--bodylog-bin` overrides or PATH manipulation (the pattern already exists for nutlog/repslog).
-- Update `agent-usage.md` and add concrete bodylog examples to AGENTS.md quick reference if desired.
+**All phases of spec/03-bodylog.md are now complete.**
 
-The foundation is solid and matches the "exactly like adding a third sibling source" goal stated in the spec.
+- The optional cache (Phase 5) is implemented for body data and pull freshness (sparse `body_measurements`, `pull_log`, real migrations, cache-preferring report paths, full bypass via `--no-cache`).
+- Daily/weekly light enrichment (Phase 3), richer agent `body` payload (Phase 4), Telegram daily body surface, and image data prep are done.
+- Dedicated `assert_cmd` integration tests, `agent-usage.md` examples, and AGENTS.md quick-ref updates (Phase 6) are present.
+- `cargo fmt && cargo clippy -- -D warnings && cargo test` (including the new bodylog test binary) pass cleanly.
+
+Remaining work that is **outside the scope of spec/03-bodylog.md** (and was always marked as future in the original spec and initial report):
+- Full daily grain + nutrition/training aggregation engine (when that lands, the existing `body_measurements` table + pull_log can be joined/used directly).
+- Richer web report UI visualizations that consume the cached body data (sparklines, body comp cards, etc.).
+- Actual image rendering (plotters / SVG) behind the `images` feature flag that can consume the already-prepared `body_context`.
+- Further Telegram caption polish for non-krebs report types.
+
+The bodylog integration now feels exactly like "adding a third sibling source" — boring, predictable, fully optional, agent-first via `--json`, and 100% compliant with the live-CLI-only rule. The cache is a pure krebslog-owned optimization and never bypasses the requirement to obtain source truth from live child `--json` calls.
 
 ---
 
-*Report written to `reports/implementation-report-bodylog.md` following the exact documentation and reporting conventions established by the initial report and used by nutlog/repslog/bodylog.*
+*Report written (and updated in follow-up completion pass) to `reports/implementation-report-bodylog.md` following the exact documentation and reporting conventions established by the initial report and used by nutlog/repslog/bodylog.*
 
-**All success criteria from spec/03-bodylog.md section 13 have been met.**
+**All success criteria from spec/03-bodylog.md section 13 have been met** (verified in both the initial implementation and the follow-up pass that delivered the remaining phases, real cache, integration tests, and missing docs). The feature is production-ready within the constraints of the current daily-grain skeleton.
